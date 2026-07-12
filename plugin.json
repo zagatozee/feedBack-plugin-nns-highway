@@ -1,0 +1,13 @@
+{
+    "id": "nns_highway",
+    "name": "Nashville Numbers Highway",
+    "version": "0.1.0",
+    "private": false,
+    "type": "visualization",
+    "description": "Chord highway showing Nashville numbers relative to the song's detected key.",
+    "category": "practice",
+    "scriptType": "module",
+    "script": "screen.js",
+    "routes": "routes.py",
+    "settings": { "html": "settings.html" }
+}

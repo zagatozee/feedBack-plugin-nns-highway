@@ -1,0 +1,31 @@
+<div role="group" aria-labelledby="nns-settings-heading">
+    <h3 id="nns-settings-heading" class="text-sm font-medium text-gray-400 mb-2">Nashville Numbers Highway</h3>
+    <label class="flex items-start gap-2 mb-1 text-xs text-gray-300">
+        <input type="checkbox" id="nns-auto-generate" class="mt-0.5">
+        <span>
+            Automatically save computed Nashville-number data next to the song file
+            <span class="block text-gray-500 mt-0.5">
+                Only saves a result the plugin is actually confident in — never an
+                uncertain guess. The file is a plain sibling JSON next to the song's
+                own chart data (or a new entry inside the .sloppak archive); the
+                original chart file is never modified. Off by default since this
+                writes into your song library.
+            </span>
+        </span>
+    </label>
+    <script>
+        (function () {
+            var KEY = 'nns_highway.autoGenerate';
+            var box = document.getElementById('nns-auto-generate');
+            if (!box) return;
+            try {
+                box.checked = window.localStorage.getItem(KEY) === 'true';
+            } catch (e) { /* localStorage unavailable — leave unchecked */ }
+            box.addEventListener('change', function () {
+                try {
+                    window.localStorage.setItem(KEY, box.checked ? 'true' : 'false');
+                } catch (e) { /* ignore — best-effort persistence, same as the plugin's own save calls */ }
+            });
+        })();
+    </script>
+</div>
