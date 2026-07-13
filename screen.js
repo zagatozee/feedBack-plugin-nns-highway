@@ -812,10 +812,21 @@
                 const filename = getCurrentSongFilename();
                 const key = songCacheKey(filename, bundle.songInfo.arrangement_index);
                 if ((!this._cache || this._cache.songKey !== key) && this._building !== key) {
-                    this._building = key;
-                    this._buildChordData(bundle, key, filename).finally(() => {
-                        if (this._building === key) this._building = null;
-                    });
+                    if (bundle.chords.length === 0) {
+                        // No chord data for this arrangement (Bass-only tracks
+                        // and some single-note Lead tracks have none) — nothing
+                        // to detect or render. Skip the sidecar/live-computation
+                        // cascade entirely (there's nothing to fetch or compute)
+                        // and record that state so _drawOverlay can show a clear
+                        // message instead of silently rendering an empty
+                        // highway with no explanation.
+                        this._cache = { songKey: key, noChordData: true };
+                    } else {
+                        this._building = key;
+                        this._buildChordData(bundle, key, filename).finally(() => {
+                            if (this._building === key) this._building = null;
+                        });
+                    }
                 }
 
                 const visible = this._collectVisibleChords(bundle);
@@ -998,6 +1009,20 @@
                 if (!ctx) return;
                 ctx.clearRect(0, 0, this._overlayCanvas.width, this._overlayCanvas.height);
                 if (!this._cache || !this._scene) return; // first build still in flight
+
+                if (this._cache.noChordData) {
+                    const cx = this._overlayCanvas.width / 2;
+                    const cy = this._overlayCanvas.height / 2;
+                    ctx.textAlign = 'center';
+                    ctx.font = '20px sans-serif';
+                    ctx.fillStyle = 'rgba(255,255,255,0.75)';
+                    ctx.fillText('No chord data available for this arrangement', cx, cy);
+                    ctx.font = '14px sans-serif';
+                    ctx.fillStyle = 'rgba(255,255,255,0.5)';
+                    ctx.fillText('(Bass and some single-note Lead tracks have none — try Rhythm/Combo)', cx, cy + 26);
+                    ctx.textAlign = 'start';
+                    return;
+                }
 
                 const uncertain = this._cache.confidence === 'uncertain';
 
