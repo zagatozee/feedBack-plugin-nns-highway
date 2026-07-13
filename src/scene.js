@@ -213,6 +213,19 @@ export class Scene {
         gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
     }
 
+    // Restricts subsequent drawBox() calls to a sub-rectangle of the canvas
+    // (buffer pixel coordinates, origin bottom-left per WebGL convention —
+    // callers pass a top-left-origin rect and this flips it). Used by the
+    // highway width/offset settings to letterbox/pillarbox the 3D scene
+    // into a narrower or shifted column without touching the full-canvas
+    // clear() above, so the area outside the column stays the same
+    // background color rather than a visibly different fill. Must be
+    // called once per frame after clear(), before any drawBox() calls —
+    // clear() always resets the viewport to the full canvas first.
+    setDrawViewport(x, yTop, width, height, canvasHeight) {
+        this.gl.viewport(x, canvasHeight - yTop - height, width, height);
+    }
+
     // tx/ty/tz = world position of the box's BASE (bottom-center);
     // sx/sy/sz = box dimensions in world units; color = [r,g,b,a] 0..1.
     drawBox(tx, ty, tz, sx, sy, sz, color) {
@@ -236,14 +249,22 @@ export class Scene {
     // glyph and the block it labels always agree on where "here" is.
     // Returns null when the point is behind the camera (cw <= 0) — callers
     // should skip drawing rather than plot a garbage position.
-    worldToScreen(x, y, z, canvasWidth, canvasHeight) {
+    //
+    // viewportRect (buffer pixels, top-left origin, {x,y,width,height})
+    // must match whatever setDrawViewport() the matching drawBox() call
+    // used that frame (defaults to the full canvas) — otherwise glyphs
+    // drift away from their blocks whenever the highway width/offset
+    // settings shrink or shift the 3D content to less than the full
+    // canvas.
+    worldToScreen(x, y, z, canvasWidth, canvasHeight, viewportRect) {
         const [cx, cy, , cw] = transformPoint(this.viewProj, x, y, z);
         if (cw <= 0.0001) return null;
         const ndcX = cx / cw;
         const ndcY = cy / cw;
+        const vp = viewportRect || { x: 0, y: 0, width: canvasWidth, height: canvasHeight };
         return {
-            x: (ndcX * 0.5 + 0.5) * canvasWidth,
-            y: (1 - (ndcY * 0.5 + 0.5)) * canvasHeight,
+            x: vp.x + (ndcX * 0.5 + 0.5) * vp.width,
+            y: vp.y + (1 - (ndcY * 0.5 + 0.5)) * vp.height,
         };
     }
 }

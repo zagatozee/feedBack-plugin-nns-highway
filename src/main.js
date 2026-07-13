@@ -34,6 +34,10 @@ import { getColorScheme, DEFAULT_COLOR_SCHEME_ID, isRealNashvilleNumber } from '
 
 const AUTO_GENERATE_KEY = 'nns_highway.autoGenerate';
 const COLOR_SCHEME_KEY = 'nns_highway.colorScheme';
+const HIGHWAY_WIDTH_KEY = 'nns_highway.highwayWidthPct';
+const HIGHWAY_OFFSET_KEY = 'nns_highway.highwayOffsetPct';
+const HIGHWAY_WIDTH_DEFAULT_PCT = 100;
+const HIGHWAY_OFFSET_DEFAULT_PCT = 0;
 
 function isAutoGenerateEnabled() {
     try {
@@ -49,6 +53,27 @@ function getActiveColorScheme() {
     } catch (e) {
         return getColorScheme(DEFAULT_COLOR_SCHEME_ID);
     }
+}
+
+// Highway width (% of canvas) and horizontal offset from center (% of
+// canvas, negative = left) — settings.html's two range sliders. Read only
+// on resize/canvas-replace (see _updateViewportRect), never per-frame, per
+// this file's DOM/localStorage perf rule. Clamped defensively since these
+// come from localStorage, which a user could hand-edit to a garbage value.
+function getActiveLayoutSettings() {
+    let widthPct = HIGHWAY_WIDTH_DEFAULT_PCT;
+    let offsetPct = HIGHWAY_OFFSET_DEFAULT_PCT;
+    try {
+        const storedWidth = parseFloat(window.localStorage.getItem(HIGHWAY_WIDTH_KEY));
+        if (Number.isFinite(storedWidth)) widthPct = storedWidth;
+    } catch (e) { /* localStorage unavailable -> default */ }
+    try {
+        const storedOffset = parseFloat(window.localStorage.getItem(HIGHWAY_OFFSET_KEY));
+        if (Number.isFinite(storedOffset)) offsetPct = storedOffset;
+    } catch (e) { /* localStorage unavailable -> default */ }
+    widthPct = Math.min(100, Math.max(20, widthPct));
+    offsetPct = Math.min(50, Math.max(-50, offsetPct));
+    return { widthPct, offsetPct };
 }
 
 // Standard Nashville Number System notation: a bare number means a plain
@@ -203,6 +228,14 @@ function createNnsHighwayRenderer() {
         // _drawReferencePanel to keep the legend from landing off-screen.
         _visibleRightBound: null,
 
+        // Buffer-pixel sub-rectangle {x, y, width, height} (top-left
+        // origin) the 3D scene actually renders into, per the highway
+        // width/offset settings — see _updateViewportRect(). Defaults to
+        // the full canvas. Recomputed on resize/canvas-replace only
+        // (localStorage + the width/height it's derived from are both
+        // resize-time-only reads, per this file's per-frame perf rule).
+        _viewportRect: null,
+
         init(canvas, bundle) {
             this._canvas = canvas;
             this._cache = null;
@@ -239,12 +272,14 @@ function createNnsHighwayRenderer() {
             canvas.parentNode.insertBefore(this._overlayCanvas, canvas.nextSibling);
             this._overlayCtx = this._overlayCanvas.getContext('2d');
 
+            this._updateViewportRect();
             this._initGL(canvas);
             this._updateVisibleRightBound();
 
             this._onCanvasReplaced = (event) => {
                 const { newCanvas } = event.detail;
                 this._canvas = newCanvas;
+                this._updateViewportRect();
                 // A replaced canvas means a brand new WebGL2 context — every
                 // GL object bound to the old one (program, buffers, VAO) is
                 // gone with it, so this rebuilds the whole Scene rather than
@@ -286,10 +321,41 @@ function createNnsHighwayRenderer() {
             this._visibleRightBound = Math.max(0, visibleRightCss * scaleX);
         },
 
+        // Computes the buffer-pixel sub-rectangle the 3D scene renders
+        // into, from settings.html's width/offset sliders (see
+        // getActiveLayoutSettings()). width=100/offset=0 (the defaults)
+        // yields the full canvas, so this is a no-op for players who never
+        // touch those settings. Resize-time only, same reasoning as
+        // _updateVisibleRightBound() — never called from draw().
+        // canvasWidth/canvasHeight default to this._canvas's own buffer
+        // size but can be passed explicitly (resize() receives the new
+        // size as arguments; core updates this._canvas's actual width/
+        // height attributes around the same time, but this avoids
+        // depending on that ordering).
+        _updateViewportRect(canvasWidth, canvasHeight) {
+            if (!this._canvas) return;
+            const { widthPct, offsetPct } = getActiveLayoutSettings();
+            canvasWidth = canvasWidth != null ? canvasWidth : this._canvas.width;
+            canvasHeight = canvasHeight != null ? canvasHeight : this._canvas.height;
+            const width = Math.max(1, Math.round(canvasWidth * widthPct / 100));
+            // offsetPct shifts the column's CENTER away from the canvas's
+            // own center, e.g. +50% (of canvas width) moves it as far
+            // right as it can go while the column's left edge stays
+            // on-canvas.
+            const centerX = canvasWidth / 2 + (canvasWidth * offsetPct / 100);
+            const x = Math.round(Math.min(Math.max(0, centerX - width / 2), canvasWidth - width));
+            this._viewportRect = { x, y: 0, width, height: canvasHeight };
+        },
+
         _initGL(canvas) {
             this._gl = canvas.getContext('webgl2');
             this._scene = new Scene();
-            const aspect = canvas.height > 0 ? canvas.width / canvas.height : 1;
+            // Aspect is derived from the VIEWPORT rect (the width/offset
+            // settings' sub-column), not the raw canvas — otherwise a
+            // narrowed column would stretch/squash the 3D perspective
+            // instead of just showing less of the same undistorted scene.
+            const vp = this._viewportRect || { width: canvas.width, height: canvas.height };
+            const aspect = vp.height > 0 ? vp.width / vp.height : 1;
             this._scene.init(this._gl, aspect);
         },
 
@@ -330,6 +396,11 @@ function createNnsHighwayRenderer() {
                 (this._overlayCanvas.width !== this._canvas.width || this._overlayCanvas.height !== this._canvas.height)) {
                 this._overlayCanvas.width = this._canvas.width;
                 this._overlayCanvas.height = this._canvas.height;
+                this._updateViewportRect();
+                if (this._scene) {
+                    const vp = this._viewportRect;
+                    this._scene.setAspect(vp.height > 0 ? vp.width / vp.height : 1);
+                }
                 this._updateVisibleRightBound();
             }
 
@@ -343,7 +414,11 @@ function createNnsHighwayRenderer() {
                 this._overlayCanvas.width = w;
                 this._overlayCanvas.height = h;
             }
-            if (this._scene) this._scene.setAspect(h > 0 ? w / h : 1);
+            this._updateViewportRect(w, h);
+            if (this._scene) {
+                const vp = this._viewportRect || { width: w, height: h };
+                this._scene.setAspect(vp.height > 0 ? vp.width / vp.height : 1);
+            }
             this._updateVisibleRightBound();
         },
 
@@ -510,6 +585,12 @@ function createNnsHighwayRenderer() {
             const scene = this._scene;
             if (!scene || !scene.gl) return;
             scene.clear(this._canvas.width, this._canvas.height);
+            // Restrict actual scene rendering to the width/offset settings'
+            // sub-column (defaults to the full canvas) — see
+            // _updateViewportRect(). Must be set after clear(), which always
+            // resets the viewport to the full canvas first.
+            const vp = this._viewportRect || { x: 0, y: 0, width: this._canvas.width, height: this._canvas.height };
+            scene.setDrawViewport(vp.x, vp.y, vp.width, vp.height, this._canvas.height);
 
             scene.drawBox(
                 0, -0.05, -HIGHWAY.FLOOR_LENGTH / 2,
@@ -585,6 +666,7 @@ function createNnsHighwayRenderer() {
                 const screen = this._scene.worldToScreen(
                     0, HIGHWAY.BLOCK_HEIGHT + 0.15, v.z,
                     this._overlayCanvas.width, this._overlayCanvas.height,
+                    this._viewportRect,
                 );
                 if (!screen) continue; // behind the camera — shouldn't happen within the culled window, but cheap to guard
 

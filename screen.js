@@ -311,6 +311,19 @@
             gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
         }
 
+        // Restricts subsequent drawBox() calls to a sub-rectangle of the canvas
+        // (buffer pixel coordinates, origin bottom-left per WebGL convention —
+        // callers pass a top-left-origin rect and this flips it). Used by the
+        // highway width/offset settings to letterbox/pillarbox the 3D scene
+        // into a narrower or shifted column without touching the full-canvas
+        // clear() above, so the area outside the column stays the same
+        // background color rather than a visibly different fill. Must be
+        // called once per frame after clear(), before any drawBox() calls —
+        // clear() always resets the viewport to the full canvas first.
+        setDrawViewport(x, yTop, width, height, canvasHeight) {
+            this.gl.viewport(x, canvasHeight - yTop - height, width, height);
+        }
+
         // tx/ty/tz = world position of the box's BASE (bottom-center);
         // sx/sy/sz = box dimensions in world units; color = [r,g,b,a] 0..1.
         drawBox(tx, ty, tz, sx, sy, sz, color) {
@@ -334,14 +347,22 @@
         // glyph and the block it labels always agree on where "here" is.
         // Returns null when the point is behind the camera (cw <= 0) — callers
         // should skip drawing rather than plot a garbage position.
-        worldToScreen(x, y, z, canvasWidth, canvasHeight) {
+        //
+        // viewportRect (buffer pixels, top-left origin, {x,y,width,height})
+        // must match whatever setDrawViewport() the matching drawBox() call
+        // used that frame (defaults to the full canvas) — otherwise glyphs
+        // drift away from their blocks whenever the highway width/offset
+        // settings shrink or shift the 3D content to less than the full
+        // canvas.
+        worldToScreen(x, y, z, canvasWidth, canvasHeight, viewportRect) {
             const [cx, cy, , cw] = transformPoint(this.viewProj, x, y, z);
             if (cw <= 0.0001) return null;
             const ndcX = cx / cw;
             const ndcY = cy / cw;
+            const vp = viewportRect || { x: 0, y: 0, width: canvasWidth, height: canvasHeight };
             return {
-                x: (ndcX * 0.5 + 0.5) * canvasWidth,
-                y: (1 - (ndcY * 0.5 + 0.5)) * canvasHeight,
+                x: vp.x + (ndcX * 0.5 + 0.5) * vp.width,
+                y: vp.y + (1 - (ndcY * 0.5 + 0.5)) * vp.height,
             };
         }
     }
@@ -810,6 +831,10 @@
 
     const AUTO_GENERATE_KEY = 'nns_highway.autoGenerate';
     const COLOR_SCHEME_KEY = 'nns_highway.colorScheme';
+    const HIGHWAY_WIDTH_KEY = 'nns_highway.highwayWidthPct';
+    const HIGHWAY_OFFSET_KEY = 'nns_highway.highwayOffsetPct';
+    const HIGHWAY_WIDTH_DEFAULT_PCT = 100;
+    const HIGHWAY_OFFSET_DEFAULT_PCT = 0;
 
     function isAutoGenerateEnabled() {
         try {
@@ -825,6 +850,27 @@
         } catch (e) {
             return getColorScheme(DEFAULT_COLOR_SCHEME_ID);
         }
+    }
+
+    // Highway width (% of canvas) and horizontal offset from center (% of
+    // canvas, negative = left) — settings.html's two range sliders. Read only
+    // on resize/canvas-replace (see _updateViewportRect), never per-frame, per
+    // this file's DOM/localStorage perf rule. Clamped defensively since these
+    // come from localStorage, which a user could hand-edit to a garbage value.
+    function getActiveLayoutSettings() {
+        let widthPct = HIGHWAY_WIDTH_DEFAULT_PCT;
+        let offsetPct = HIGHWAY_OFFSET_DEFAULT_PCT;
+        try {
+            const storedWidth = parseFloat(window.localStorage.getItem(HIGHWAY_WIDTH_KEY));
+            if (Number.isFinite(storedWidth)) widthPct = storedWidth;
+        } catch (e) { /* localStorage unavailable -> default */ }
+        try {
+            const storedOffset = parseFloat(window.localStorage.getItem(HIGHWAY_OFFSET_KEY));
+            if (Number.isFinite(storedOffset)) offsetPct = storedOffset;
+        } catch (e) { /* localStorage unavailable -> default */ }
+        widthPct = Math.min(100, Math.max(20, widthPct));
+        offsetPct = Math.min(50, Math.max(-50, offsetPct));
+        return { widthPct, offsetPct };
     }
 
     // Standard Nashville Number System notation: a bare number means a plain
@@ -979,6 +1025,14 @@
             // _drawReferencePanel to keep the legend from landing off-screen.
             _visibleRightBound: null,
 
+            // Buffer-pixel sub-rectangle {x, y, width, height} (top-left
+            // origin) the 3D scene actually renders into, per the highway
+            // width/offset settings — see _updateViewportRect(). Defaults to
+            // the full canvas. Recomputed on resize/canvas-replace only
+            // (localStorage + the width/height it's derived from are both
+            // resize-time-only reads, per this file's per-frame perf rule).
+            _viewportRect: null,
+
             init(canvas, bundle) {
                 this._canvas = canvas;
                 this._cache = null;
@@ -1015,12 +1069,14 @@
                 canvas.parentNode.insertBefore(this._overlayCanvas, canvas.nextSibling);
                 this._overlayCtx = this._overlayCanvas.getContext('2d');
 
+                this._updateViewportRect();
                 this._initGL(canvas);
                 this._updateVisibleRightBound();
 
                 this._onCanvasReplaced = (event) => {
                     const { newCanvas } = event.detail;
                     this._canvas = newCanvas;
+                    this._updateViewportRect();
                     // A replaced canvas means a brand new WebGL2 context — every
                     // GL object bound to the old one (program, buffers, VAO) is
                     // gone with it, so this rebuilds the whole Scene rather than
@@ -1062,10 +1118,41 @@
                 this._visibleRightBound = Math.max(0, visibleRightCss * scaleX);
             },
 
+            // Computes the buffer-pixel sub-rectangle the 3D scene renders
+            // into, from settings.html's width/offset sliders (see
+            // getActiveLayoutSettings()). width=100/offset=0 (the defaults)
+            // yields the full canvas, so this is a no-op for players who never
+            // touch those settings. Resize-time only, same reasoning as
+            // _updateVisibleRightBound() — never called from draw().
+            // canvasWidth/canvasHeight default to this._canvas's own buffer
+            // size but can be passed explicitly (resize() receives the new
+            // size as arguments; core updates this._canvas's actual width/
+            // height attributes around the same time, but this avoids
+            // depending on that ordering).
+            _updateViewportRect(canvasWidth, canvasHeight) {
+                if (!this._canvas) return;
+                const { widthPct, offsetPct } = getActiveLayoutSettings();
+                canvasWidth = canvasWidth != null ? canvasWidth : this._canvas.width;
+                canvasHeight = canvasHeight != null ? canvasHeight : this._canvas.height;
+                const width = Math.max(1, Math.round(canvasWidth * widthPct / 100));
+                // offsetPct shifts the column's CENTER away from the canvas's
+                // own center, e.g. +50% (of canvas width) moves it as far
+                // right as it can go while the column's left edge stays
+                // on-canvas.
+                const centerX = canvasWidth / 2 + (canvasWidth * offsetPct / 100);
+                const x = Math.round(Math.min(Math.max(0, centerX - width / 2), canvasWidth - width));
+                this._viewportRect = { x, y: 0, width, height: canvasHeight };
+            },
+
             _initGL(canvas) {
                 this._gl = canvas.getContext('webgl2');
                 this._scene = new Scene();
-                const aspect = canvas.height > 0 ? canvas.width / canvas.height : 1;
+                // Aspect is derived from the VIEWPORT rect (the width/offset
+                // settings' sub-column), not the raw canvas — otherwise a
+                // narrowed column would stretch/squash the 3D perspective
+                // instead of just showing less of the same undistorted scene.
+                const vp = this._viewportRect || { width: canvas.width, height: canvas.height };
+                const aspect = vp.height > 0 ? vp.width / vp.height : 1;
                 this._scene.init(this._gl, aspect);
             },
 
@@ -1106,6 +1193,11 @@
                     (this._overlayCanvas.width !== this._canvas.width || this._overlayCanvas.height !== this._canvas.height)) {
                     this._overlayCanvas.width = this._canvas.width;
                     this._overlayCanvas.height = this._canvas.height;
+                    this._updateViewportRect();
+                    if (this._scene) {
+                        const vp = this._viewportRect;
+                        this._scene.setAspect(vp.height > 0 ? vp.width / vp.height : 1);
+                    }
                     this._updateVisibleRightBound();
                 }
 
@@ -1119,7 +1211,11 @@
                     this._overlayCanvas.width = w;
                     this._overlayCanvas.height = h;
                 }
-                if (this._scene) this._scene.setAspect(h > 0 ? w / h : 1);
+                this._updateViewportRect(w, h);
+                if (this._scene) {
+                    const vp = this._viewportRect || { width: w, height: h };
+                    this._scene.setAspect(vp.height > 0 ? vp.width / vp.height : 1);
+                }
                 this._updateVisibleRightBound();
             },
 
@@ -1286,6 +1382,12 @@
                 const scene = this._scene;
                 if (!scene || !scene.gl) return;
                 scene.clear(this._canvas.width, this._canvas.height);
+                // Restrict actual scene rendering to the width/offset settings'
+                // sub-column (defaults to the full canvas) — see
+                // _updateViewportRect(). Must be set after clear(), which always
+                // resets the viewport to the full canvas first.
+                const vp = this._viewportRect || { x: 0, y: 0, width: this._canvas.width, height: this._canvas.height };
+                scene.setDrawViewport(vp.x, vp.y, vp.width, vp.height, this._canvas.height);
 
                 scene.drawBox(
                     0, -0.05, -HIGHWAY.FLOOR_LENGTH / 2,
@@ -1361,6 +1463,7 @@
                     const screen = this._scene.worldToScreen(
                         0, HIGHWAY.BLOCK_HEIGHT + 0.15, v.z,
                         this._overlayCanvas.width, this._overlayCanvas.height,
+                        this._viewportRect,
                     );
                     if (!screen) continue; // behind the camera — shouldn't happen within the culled window, but cheap to guard
 
