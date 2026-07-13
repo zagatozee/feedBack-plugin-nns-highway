@@ -1362,7 +1362,22 @@
                 }
                 ctx.textAlign = 'start';
 
-                this._drawReferencePanel(ctx);
+                // Defensive: an uncaught exception here would propagate out of
+                // draw() entirely and get silently swallowed by core's
+                // per-frame error handling (the same mechanism that reverted
+                // to the default renderer after the lowerBoundT bug) -- which
+                // would abort the WHOLE overlay draw for that frame, not just
+                // the panel, and do so silently. Isolate it so a panel-specific
+                // failure can't take down the glyphs/HUD too, and log it once
+                // so it's actually visible instead of failing invisibly.
+                try {
+                    this._drawReferencePanel(ctx);
+                } catch (e) {
+                    if (!this._loggedPanelError) {
+                        this._loggedPanelError = true;
+                        console.error('[nns_highway] reference panel draw failed:', e);
+                    }
+                }
             },
 
             // Compact "key" of every distinct chord/number the loaded song
