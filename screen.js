@@ -833,7 +833,13 @@
     // than by color — see color-scheme.js's module doc comment.
     function displayLabel(number, quality) {
         if (number == null) return null;
-        return quality && quality !== 'maj' ? `${number}${quality}` : number;
+        if (!quality || quality === 'maj') return number;
+        // A middle-dot separator, not bare concatenation — "b3" + quality "5"
+        // (a power chord, e.g. root "C5") concatenated directly reads as "b35",
+        // indistinguishable from a malformed/invalid Nashville number. The
+        // per-chord number/quality lookup itself was already correct; this was
+        // purely a display-formatting defect.
+        return `${number}·${quality}`;
     }
 
     // Lane-space conventions shared by the 3D scene and the overlay projection:
