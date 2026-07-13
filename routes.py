@@ -32,25 +32,116 @@ Two concerns live here:
        `_rewrite_zip_manifest`); nothing in this codebase ever appends to a
        zip in place. A `.bak` of the pristine original is kept on first
        write, mirroring that same core code. The sidecar is written into the
-       actual `.sloppak` archive file itself (not just the transient unpack
-       cache under `get_sloppak_cache_dir()`) so it survives reinstalls and
-       stays shareable as a single file, same as the loose-folder case.
+       actual `.sloppak` archive file itself (not just a transient unpack
+       cache) so it survives reinstalls and stays shareable as a single
+       file, same as the loose-folder case.
+
+IMPORTANT — no direct imports of core's `lib/` internals (dlc_paths, sloppak,
+loosefolder, jsonc, ...). An earlier version of this file did exactly that
+(`import dlc_paths`, `import sloppak`, `import loosefolder`, `from jsonc
+import load_json`) and it broke plugin loading entirely in a real install
+(feedback-desktop) with "No module named 'dlc_paths'" — core's `lib/` is not
+a stable, guaranteed-importable surface for plugins (only the documented
+`context` dict passed to `setup(app, context)` is; see CLAUDE.md's Plugin
+System section). Confirmed empirically: `sloppak`, `loosefolder`, and
+`jsonc` fail to import the exact same way once `dlc_paths` is fixed and
+Python actually reaches those import lines — the original bug report only
+ever showed the FIRST failing import, not the full extent. Every helper
+below is self-contained: stdlib (`zipfile`, `json`, `xml.etree`) plus
+`PyYAML` (a real installed pip package — safe regardless of `PYTHONPATH`,
+unlike a bare `lib/` source file) for `manifest.yaml`. This plugin only ever
+needs a narrow slice of what those core modules do (locate an arrangement's
+source file, read/write one JSON member) — not full format-parity, so
+reimplementing that slice locally is a small, honest trade, not a
+duplication of substantial logic.
 """
 
 import json
+import os
 import shutil
 import xml.etree.ElementTree as ET
 import zipfile
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
+import yaml
 from fastapi import Body, FastAPI, HTTPException
 
-import dlc_paths
-import sloppak as sloppak_mod
-import loosefolder as loosefolder_mod
-from jsonc import load_json
-
 PLUGIN_ID = "nns_highway"
+
+_SLOPPAK_EXTS = (".sloppak", ".feedpak")
+
+
+def _resolve_dlc_path(dlc: Path, filename: str) -> Path | None:
+    """Resolve `filename` under DLC_DIR and refuse anything that escapes.
+
+    Local reimplementation of lib/dlc_paths.py's `_resolve_dlc_path` (same
+    lexical-containment algorithm: reject `..`/absolute/drive-letter paths,
+    then normalize without following symlinks) — see the module docstring
+    for why this isn't imported from core directly.
+    """
+    if not filename:
+        return None
+    safe = filename.replace("\\", "/")
+    if "\x00" in safe:
+        return None
+    if (PurePosixPath(safe).is_absolute()
+            or PureWindowsPath(safe).is_absolute()
+            or PureWindowsPath(safe).drive):
+        return None
+    try:
+        root = dlc.resolve()
+        candidate = Path(os.path.normpath(root / safe))
+        if not candidate.is_relative_to(root):
+            return None
+    except (ValueError, OSError):
+        return None
+    return candidate
+
+
+def _is_sloppak_path(path: Path) -> bool:
+    return path.name.lower().endswith(_SLOPPAK_EXTS)
+
+
+def _load_sloppak_manifest(song_path: Path) -> dict:
+    """Read manifest.yaml/.yml from a sloppak, directory or zip form."""
+    if song_path.is_dir():
+        for name in ("manifest.yaml", "manifest.yml"):
+            mf = song_path / name
+            if mf.exists():
+                return yaml.safe_load(mf.read_text(encoding="utf-8")) or {}
+        return {}
+    try:
+        with zipfile.ZipFile(song_path, "r") as z:
+            names = set(z.namelist())
+            for name in ("manifest.yaml", "manifest.yml"):
+                if name in names:
+                    return yaml.safe_load(z.read(name).decode("utf-8")) or {}
+    except (zipfile.BadZipFile, OSError):
+        pass
+    return {}
+
+
+def _read_sloppak_member(song_path: Path, rel: str) -> bytes | None:
+    """Read one member's raw bytes from a sloppak (directory or zip form),
+    with containment checking for the directory case (zip member names
+    can't escape their own archive the way a filesystem path can)."""
+    if song_path.is_dir():
+        p = (song_path / rel).resolve()
+        try:
+            p.relative_to(song_path.resolve())
+        except ValueError:
+            return None
+        if not p.is_file():
+            return None
+        return p.read_bytes()
+    try:
+        with zipfile.ZipFile(song_path, "r") as z:
+            if rel not in z.namelist():
+                return None
+            return z.read(rel)
+    except (zipfile.BadZipFile, KeyError, OSError):
+        return None
+
 
 # Mirrors lib/song.py::load_song's vocals/showlights skip AND its final
 # arrangement-list ordering — kept in sync manually since core doesn't
@@ -114,30 +205,22 @@ def _parse_sections_from_xml(xml_path: Path) -> list[dict]:
     return sections
 
 
-def _sections_from_sloppak(song_path: Path, filename: str, arrangement_index: int,
-                            dlc: Path, sloppak_cache_dir: Path) -> list[dict] | None:
-    manifest = sloppak_mod.load_manifest(song_path)
+def _sections_from_sloppak(song_path: Path, arrangement_index: int) -> list[dict] | None:
+    manifest = _load_sloppak_manifest(song_path)
     entries = [e for e in (manifest.get("arrangements") or []) if isinstance(e, dict)]
     if not (0 <= arrangement_index < len(entries)):
         return None
-    entry = entries[arrangement_index]
-    rel_raw = entry.get("file")
+    rel_raw = entries[arrangement_index].get("file")
     rel = rel_raw.strip() if isinstance(rel_raw, str) else ""
     if not rel:
         return None
 
-    source_dir = sloppak_mod.resolve_source_dir(filename, dlc, sloppak_cache_dir)
-    try:
-        arr_path = (source_dir / rel).resolve()
-        arr_path.relative_to(source_dir.resolve())
-    except (ValueError, OSError):
+    raw = _read_sloppak_member(song_path, rel)
+    if raw is None:
         return None
-    if not arr_path.exists():
-        return None
-
     try:
-        data = load_json(arr_path)
-    except Exception:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError):
         return None
     raw_sections = data.get("sections") or []
     sections = []
@@ -163,12 +246,25 @@ def _sidecar_rel_for_sloppak(rel_arrangement_path: str) -> str:
     return str(p.with_name(p.stem + ".nns.json"))
 
 
-def _read_sidecar(sidecar_path: Path) -> dict | None:
+def _read_sidecar_file(sidecar_path: Path) -> dict | None:
     if not sidecar_path.exists():
         return None
     try:
-        data = load_json(sidecar_path)
-    except Exception:
+        data = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("chords"), list):
+        return None
+    return data
+
+
+def _read_sidecar_sloppak(song_path: Path, sidecar_rel: str) -> dict | None:
+    raw = _read_sloppak_member(song_path, sidecar_rel)
+    if raw is None:
+        return None
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError):
         return None
     if not isinstance(data, dict) or not isinstance(data.get("chords"), list):
         return None
@@ -234,31 +330,39 @@ def _validate_nashville_payload(body: dict) -> str | None:
 
 def setup(app: FastAPI, context: dict) -> None:
     get_dlc_dir = context["get_dlc_dir"]
-    get_sloppak_cache_dir = context["get_sloppak_cache_dir"]
     log = context["log"]
 
     def _resolve_song(filename: str, arrangement: int):
         """Shared prelude for every route below: validate + classify the
-        song. Returns (song_path, is_slop, is_loose) or raises HTTPException."""
+        song. Returns (song_path, is_slop, is_loose) or raises HTTPException.
+
+        Format detection is deliberately narrower than core's own
+        `is_sloppak`/`is_loose_song` (which also check for playable audio —
+        irrelevant to this plugin, which only cares whether there's
+        arrangement data to read/write): sloppak is a filename-extension
+        check, loose-folder is just "a directory that isn't a sloppak" —
+        `_playable_arrangement_xmls` already degrades to an empty list
+        gracefully for a directory with no usable XML.
+        """
         dlc = get_dlc_dir()
         if not dlc:
             raise HTTPException(status_code=404, detail="DLC folder not configured")
-        song_path = dlc_paths._resolve_dlc_path(dlc, filename)
+        song_path = _resolve_dlc_path(dlc, filename)
         if song_path is None:
             raise HTTPException(status_code=403, detail="forbidden")
         if not song_path.exists():
             raise HTTPException(status_code=404, detail="not found")
         if arrangement < 0:
             raise HTTPException(status_code=400, detail="arrangement index required")
-        is_slop = sloppak_mod.is_sloppak(song_path)
-        is_loose = (not is_slop) and loosefolder_mod.is_loose_song(song_path)
+        is_slop = _is_sloppak_path(song_path)
+        is_loose = (not is_slop) and song_path.is_dir()
         if not (is_slop or is_loose):
             raise HTTPException(status_code=404, detail="not a chart")
-        return dlc, song_path, is_slop, is_loose
+        return song_path, is_slop, is_loose
 
     @app.get(f"/api/plugins/{PLUGIN_ID}/sections/{{filename:path}}")
     def get_arrangement_sections(filename: str, arrangement: int = -1):
-        dlc, song_path, is_slop, is_loose = _resolve_song(filename, arrangement)
+        song_path, is_slop, is_loose = _resolve_song(filename, arrangement)
 
         try:
             if is_loose:
@@ -267,8 +371,7 @@ def setup(app: FastAPI, context: dict) -> None:
                     return {"sections": None, "source": "loose", "reason": "arrangement index out of range"}
                 sections = _parse_sections_from_xml(xmls[arrangement])
             else:
-                sloppak_cache_dir = Path(get_sloppak_cache_dir())
-                sections = _sections_from_sloppak(song_path, filename, arrangement, dlc, sloppak_cache_dir)
+                sections = _sections_from_sloppak(song_path, arrangement)
                 if sections is None:
                     return {"sections": None, "source": "sloppak", "reason": "no per-arrangement section data"}
         except Exception:
@@ -283,17 +386,16 @@ def setup(app: FastAPI, context: dict) -> None:
 
     @app.get(f"/api/plugins/{PLUGIN_ID}/nashville/{{filename:path}}")
     def get_precomputed_nashville(filename: str, arrangement: int = -1):
-        dlc, song_path, is_slop, is_loose = _resolve_song(filename, arrangement)
+        song_path, is_slop, is_loose = _resolve_song(filename, arrangement)
 
         try:
             if is_loose:
                 xmls = _playable_arrangement_xmls(song_path)
                 if not (0 <= arrangement < len(xmls)):
                     return {"available": False, "reason": "arrangement index out of range"}
-                data = _read_sidecar(_sidecar_path_for(xmls[arrangement]))
+                data = _read_sidecar_file(_sidecar_path_for(xmls[arrangement]))
             else:
-                sloppak_cache_dir = Path(get_sloppak_cache_dir())
-                manifest = sloppak_mod.load_manifest(song_path)
+                manifest = _load_sloppak_manifest(song_path)
                 entries = [e for e in (manifest.get("arrangements") or []) if isinstance(e, dict)]
                 if not (0 <= arrangement < len(entries)):
                     return {"available": False, "reason": "arrangement index out of range"}
@@ -301,13 +403,7 @@ def setup(app: FastAPI, context: dict) -> None:
                 rel = rel_raw.strip() if isinstance(rel_raw, str) else ""
                 if not rel:
                     return {"available": False, "reason": "arrangement has no file entry"}
-                source_dir = sloppak_mod.resolve_source_dir(filename, dlc, sloppak_cache_dir)
-                try:
-                    sidecar_path = (source_dir / _sidecar_rel_for_sloppak(rel)).resolve()
-                    sidecar_path.relative_to(source_dir.resolve())
-                except (ValueError, OSError):
-                    return {"available": False}
-                data = _read_sidecar(sidecar_path)
+                data = _read_sidecar_sloppak(song_path, _sidecar_rel_for_sloppak(rel))
         except Exception:
             log.warning("nns_highway: failed to read precomputed data for %r arrangement=%s", filename, arrangement, exc_info=True)
             return {"available": False, "reason": "read error"}
@@ -318,7 +414,7 @@ def setup(app: FastAPI, context: dict) -> None:
 
     @app.post(f"/api/plugins/{PLUGIN_ID}/nashville/{{filename:path}}")
     def save_precomputed_nashville(filename: str, arrangement: int = -1, body: dict = Body(...)):
-        dlc, song_path, is_slop, is_loose = _resolve_song(filename, arrangement)
+        song_path, is_slop, is_loose = _resolve_song(filename, arrangement)
 
         err = _validate_nashville_payload(body)
         if err:
@@ -339,7 +435,7 @@ def setup(app: FastAPI, context: dict) -> None:
                 _atomic_write_text(_sidecar_path_for(xml_path), json.dumps(payload, indent=2))
                 return {"ok": True, "source": "loose"}
 
-            manifest = sloppak_mod.load_manifest(song_path)
+            manifest = _load_sloppak_manifest(song_path)
             entries = [e for e in (manifest.get("arrangements") or []) if isinstance(e, dict)]
             if not (0 <= arrangement < len(entries)):
                 raise HTTPException(status_code=400, detail="arrangement index out of range")
@@ -369,7 +465,7 @@ def setup(app: FastAPI, context: dict) -> None:
                 _atomic_write_text(sidecar_path, json.dumps(payload, indent=2))
             else:
                 # Zip-form: write into the .sloppak archive itself (not just
-                # the unpack cache) — see module docstring for why.
+                # a transient unpack cache) — see module docstring for why.
                 _rebuild_zip_with_entry(song_path, sidecar_rel, json.dumps(payload, indent=2).encode("utf-8"))
             return {"ok": True, "source": "sloppak"}
         except HTTPException:
