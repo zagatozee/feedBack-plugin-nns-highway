@@ -295,6 +295,25 @@ function createNnsHighwayRenderer() {
                 }
             }
 
+            // Defensive sync, not a resize-event dependency: _drawScene's
+            // WebGL viewport is sized from this._canvas.width/height while
+            // _drawOverlay's glyph projection is sized from
+            // this._overlayCanvas.width/height. resize() normally keeps
+            // these equal, but if the main canvas's buffer resolution
+            // changes (e.g. an adaptive render-scale update) in a frame
+            // where resize() hasn't fired yet, the two draw calls would
+            // compute screen positions against DIFFERENT pixel grids —
+            // the block and its number glyph would drift apart over time
+            // instead of tracking together. Cheap (a property read/write,
+            // not a layout-forcing DOM query), so safe to check every
+            // frame rather than only on resize.
+            if (this._canvas && this._overlayCanvas &&
+                (this._overlayCanvas.width !== this._canvas.width || this._overlayCanvas.height !== this._canvas.height)) {
+                this._overlayCanvas.width = this._canvas.width;
+                this._overlayCanvas.height = this._canvas.height;
+                this._updateVisibleRightBound();
+            }
+
             const visible = this._collectVisibleChords(bundle);
             this._drawScene(visible);
             this._drawOverlay(visible);
