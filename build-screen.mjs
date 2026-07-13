@@ -32,6 +32,7 @@ const ORDER = [
     'src/nashville.js',
     'src/sections-api.js',
     'src/nashville-file-api.js',
+    'src/color-scheme.js',
     'src/main.js',
 ];
 

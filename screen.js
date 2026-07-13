@@ -640,6 +640,144 @@
     }
 
 
+    // ── src/color-scheme.js ─────────────────────────────────────────
+    // Chord/number color schemes — swappable by design (see settings.html's
+    // nns-color-scheme select). Only one scheme exists today (circle_of_fifths,
+    // the default), but every caller goes through getColorScheme(id) rather
+    // than importing colorForChord directly, so adding a second scheme later
+    // is a matter of adding an entry to COLOR_SCHEMES, not a rewrite.
+    //
+    // circle_of_fifths is also the STANDING convention for chord/number
+    // coloring across projects — the same underlying logic (hue = circle-of-
+    // fifths distance from tonic, not raw scale-degree number) is reused for
+    // the Pub Stage table layout rather than re-derived there. Keep this file
+    // self-contained (no imports) so it stays trivially portable.
+
+    const SEMITONES_PER_OCTAVE = 12;
+    const HUE_STEP_DEGREES = 360 / SEMITONES_PER_OCTAVE; // 30
+
+    // Multiplicative inverse of 7 mod 12 is 7 itself (7*7 = 49 = 4*12 + 1) —
+    // stepping by a fifth (7 semitones) forward k times lands on semitone
+    // offset s = 7k mod 12, so k = 7s mod 12 recovers "how many fifths away"
+    // a given semitone offset is, i.e. its position on the circle of fifths.
+    const FIFTHS_INVERSE_MOD_12 = 7;
+
+    function circleOfFifthsPosition(semitoneOffsetFromTonic) {
+        const s = ((semitoneOffsetFromTonic % SEMITONES_PER_OCTAVE) + SEMITONES_PER_OCTAVE) % SEMITONES_PER_OCTAVE;
+        return (s * FIFTHS_INVERSE_MOD_12) % SEMITONES_PER_OCTAVE;
+    }
+
+    // Semitone offset from tonic for each plain-major-scale degree (1-indexed
+    // degree -> array index degree-1). Matches nashville.js's EXPECTED_DISTANCE.
+    const DEGREE_SEMITONES = [0, 2, 4, 5, 7, 9, 11];
+
+    // Parses the exact string format chordToNashvilleNumber() returns
+    // ("1", "b7", "#4", "bb6", ...) back into a semitone offset from the
+    // tonic, without needing the original chord symbol + key again — this is
+    // the representation already threaded through the rest of the plugin
+    // (sidecar schema, numbersById map), so reconstructing from it keeps this
+    // module decoupled from nashville.js.
+    const NASHVILLE_NUMBER_RE = /^(b{0,2}|#{0,2})([1-7])$/;
+
+    // True only for the exact `${modifier}${degree}` shape
+    // chordToNashvilleNumber() produces — false for chordToNashvilleNumber()'s
+    // other fallback return values (e.g. the raw original symbol string, for
+    // templates with no diatonically-resolvable root — fret-shape-only Lead
+    // double-stops like "XXXX87_XXXX21"). Callers use this to decide whether a
+    // chord is a real scale degree worth coloring at all, vs. a neutral/
+    // needs-review case that shouldn't silently look like "the 1 chord" just
+    // because it fails to parse.
+    function isRealNashvilleNumber(nashvilleNumber) {
+        return NASHVILLE_NUMBER_RE.test(nashvilleNumber || '');
+    }
+
+    function semitoneFromNashvilleNumber(nashvilleNumber) {
+        const m = NASHVILLE_NUMBER_RE.exec(nashvilleNumber || '');
+        if (!m) return null;
+        const [, modifier, degreeStr] = m;
+        const degree = parseInt(degreeStr, 10);
+        let semitone = DEGREE_SEMITONES[degree - 1];
+        if (modifier === 'b') semitone -= 1;
+        else if (modifier === 'bb') semitone -= 2;
+        else if (modifier === '#') semitone += 1;
+        else if (modifier === '##') semitone += 2;
+        return semitone;
+    }
+
+    // Fallback hue for '?' / unparseable numbers — arbitrary but stable so the
+    // same non-chord glyph always renders the same (desaturated) color rather
+    // than flickering between calls.
+    const FALLBACK_HUE = 0;
+
+    function hueForNashvilleNumber(nashvilleNumber) {
+        const semitone = semitoneFromNashvilleNumber(nashvilleNumber);
+        if (semitone === null) return FALLBACK_HUE;
+        return circleOfFifthsPosition(semitone) * HUE_STEP_DEGREES;
+    }
+
+    // quality: the suffix parseChordSymbol() produces ('', 'maj', 'm', 'm7',
+    // 'dim', 'dim7', '7', 'maj7', 'sus4', 'aug', ...). Only minor and
+    // diminished chords get the darker/desaturated treatment per the project
+    // decision — extensions and other modifiers (7, sus, add9, #/b) stay at
+    // the base hue and are distinguished only by the on-block text label, not
+    // a separate color.
+    function isMinorOrDiminished(quality) {
+        const q = (quality || '').toLowerCase();
+        if (q.startsWith('maj')) return false; // maj, maj7, maj9... (must be checked before the bare 'm' check below)
+        if (q.startsWith('dim')) return true;
+        if (q.startsWith('m')) return true; // m, m6, m7, m7b5, m9, mmaj7 — all minor-family
+        return false;
+    }
+
+    function hslToRgb01(h, s, l) {
+        const c = (1 - Math.abs(2 * l - 1)) * s;
+        const hp = (((h % 360) + 360) % 360) / 60;
+        const x = c * (1 - Math.abs((hp % 2) - 1));
+        let r1 = 0, g1 = 0, b1 = 0;
+        if (hp < 1) { r1 = c; g1 = x; b1 = 0; }
+        else if (hp < 2) { r1 = x; g1 = c; b1 = 0; }
+        else if (hp < 3) { r1 = 0; g1 = c; b1 = x; }
+        else if (hp < 4) { r1 = 0; g1 = x; b1 = c; }
+        else if (hp < 5) { r1 = x; g1 = 0; b1 = c; }
+        else { r1 = c; g1 = 0; b1 = x; }
+        const m = l - c / 2;
+        return [r1 + m, g1 + m, b1 + m];
+    }
+
+    const SATURATION = { base: 0.62, minor: 0.40 };
+    const LIGHTNESS = { base: 0.52, minor: 0.32 };
+
+    // Returns { hue, saturation, lightness, rgb01: [r,g,b] (0-1, for WebGL),
+    // css: 'hsl(...)' (for 2D canvas) }.
+    function circleOfFifthsColorForChord(nashvilleNumber, quality) {
+        const hue = hueForNashvilleNumber(nashvilleNumber);
+        const minor = isMinorOrDiminished(quality);
+        const saturation = minor ? SATURATION.minor : SATURATION.base;
+        const lightness = minor ? LIGHTNESS.minor : LIGHTNESS.base;
+        return {
+            hue,
+            saturation,
+            lightness,
+            rgb01: hslToRgb01(hue, saturation, lightness),
+            css: `hsl(${hue.toFixed(1)}, ${(saturation * 100).toFixed(0)}%, ${(lightness * 100).toFixed(0)}%)`,
+        };
+    }
+
+    const COLOR_SCHEMES = {
+        circle_of_fifths: {
+            id: 'circle_of_fifths',
+            label: 'Circle of fifths (default)',
+            colorForChord: circleOfFifthsColorForChord,
+        },
+    };
+
+    const DEFAULT_COLOR_SCHEME_ID = 'circle_of_fifths';
+
+    function getColorScheme(id) {
+        return COLOR_SCHEMES[id] || COLOR_SCHEMES[DEFAULT_COLOR_SCHEME_ID];
+    }
+
+
     // ── src/main.js ─────────────────────────────────────────────────
     // Nashville Numbers Highway — setRenderer factory (feedBack CLAUDE.md
     // "Visualization plugins" contract). Declares contextType: 'webgl2' per the
@@ -671,6 +809,7 @@
 
 
     const AUTO_GENERATE_KEY = 'nns_highway.autoGenerate';
+    const COLOR_SCHEME_KEY = 'nns_highway.colorScheme';
 
     function isAutoGenerateEnabled() {
         try {
@@ -678,6 +817,23 @@
         } catch (e) {
             return false; // localStorage unavailable (private mode, sandboxed iframe) -> default off
         }
+    }
+
+    function getActiveColorScheme() {
+        try {
+            return getColorScheme(window.localStorage.getItem(COLOR_SCHEME_KEY) || DEFAULT_COLOR_SCHEME_ID);
+        } catch (e) {
+            return getColorScheme(DEFAULT_COLOR_SCHEME_ID);
+        }
+    }
+
+    // Standard Nashville Number System notation: a bare number means a plain
+    // major triad, so only non-major qualities get a visible suffix (e.g. "6m",
+    // "27", "4sus4"). Extensions/modifiers are distinguished this way rather
+    // than by color — see color-scheme.js's module doc comment.
+    function displayLabel(number, quality) {
+        if (number == null) return null;
+        return quality && quality !== 'maj' ? `${number}${quality}` : number;
     }
 
     // Lane-space conventions shared by the 3D scene and the overlay projection:
@@ -699,6 +855,12 @@
         BLOCK_DEPTH: 1.0,
     };
     HIGHWAY.FLOOR_LENGTH = HIGHWAY.FUTURE_WINDOW * HIGHWAY.SPEED + 10;
+
+    // Flat neutral gray for chords with no resolvable symbol (needs-review) —
+    // deliberately NOT run through the color scheme, since hue 0 there means
+    // "the 1 chord," and a needs-review block asserting that would be
+    // misleading rather than merely unstyled.
+    const NEEDS_REVIEW_RGB01 = [0.35, 0.35, 0.38];
 
     // bundle.songInfo does NOT carry the song's filename — confirmed against a
     // real running instance: the song_info WS message (and therefore
@@ -734,6 +896,27 @@
         return events;
     }
 
+    // Builds the deduplicated legend list for the reference panel — one entry
+    // per distinct on-screen label the song actually uses (same granularity as
+    // displayLabel(), so "6" and "6m" are listed separately), ordered by
+    // circle-of-fifths hue position to match the block coloring rather than by
+    // first appearance, so the legend reads like a stable reference the player
+    // can scan once rather than a shuffled list.
+    function buildUniqueChordList(numbersById, qualityById, scheme) {
+        const seen = new Map(); // label -> { label, number, quality, color }
+        for (const [id, number] of numbersById) {
+            if (!isRealNashvilleNumber(number)) continue; // skip null / non-diatonic fallback strings — not real degrees
+            const quality = qualityById.get(id) || null;
+            const label = displayLabel(number, quality);
+            if (seen.has(label)) continue;
+            seen.set(label, { label, number, quality, color: scheme.colorForChord(number, quality) });
+        }
+        return [...seen.values()].sort((a, b) => {
+            if (a.color.hue !== b.color.hue) return a.color.hue - b.color.hue;
+            return a.label.localeCompare(b.label);
+        });
+    }
+
     function createNnsHighwayRenderer() {
         return {
             contextType: 'webgl2',
@@ -762,6 +945,13 @@
             // one is still in flight.
             _building: null,
 
+            // Rightmost canvas-buffer x-coordinate actually visible in the
+            // browser viewport — see _updateVisibleRightBound()'s doc comment.
+            // Recomputed on resize only (getBoundingClientRect forces layout,
+            // so this must never run on the per-frame draw() path), used by
+            // _drawReferencePanel to keep the legend from landing off-screen.
+            _visibleRightBound: null,
+
             init(canvas, bundle) {
                 this._canvas = canvas;
                 this._cache = null;
@@ -780,6 +970,7 @@
                 this._overlayCtx = this._overlayCanvas.getContext('2d');
 
                 this._initGL(canvas);
+                this._updateVisibleRightBound();
 
                 this._onCanvasReplaced = (event) => {
                     const { newCanvas } = event.detail;
@@ -791,6 +982,7 @@
                     this._initGL(newCanvas);
                     // Re-home the overlay next to the new canvas element.
                     newCanvas.parentNode.insertBefore(this._overlayCanvas, newCanvas.nextSibling);
+                    this._updateVisibleRightBound();
                 };
                 window.feedBack.on('highway:canvas-replaced', this._onCanvasReplaced);
 
@@ -799,6 +991,29 @@
                     this._overlayCanvas.style.display = visible ? '' : 'none';
                 };
                 window.feedBack.on('highway:visibility', this._onVisibility);
+            },
+
+            // The canvas's CSS box can extend past the actual browser viewport
+            // when a persistent sidebar eats into the available width but the
+            // canvas itself is still sized to the full window width — confirmed
+            // live against feedBack's own always-on desktop nav (#v3-sidebar):
+            // canvas.getBoundingClientRect().width equals window.innerWidth
+            // regardless of viewport size, with the canvas's left edge offset by
+            // the sidebar's width, so its right edge silently overflows past
+            // the visible viewport by exactly that much. Anything drawn naively
+            // at "canvas width minus a margin" (e.g. the reference panel) can
+            // end up entirely off-screen as a result. Resize-time only — never
+            // called from draw(), since getBoundingClientRect() forces layout.
+            _updateVisibleRightBound() {
+                if (!this._canvas || !this._overlayCanvas) return;
+                const rect = this._canvas.getBoundingClientRect();
+                if (rect.width <= 0) {
+                    this._visibleRightBound = this._overlayCanvas.width;
+                    return;
+                }
+                const visibleRightCss = Math.min(rect.right, window.innerWidth) - rect.left;
+                const scaleX = this._overlayCanvas.width / rect.width;
+                this._visibleRightBound = Math.max(0, visibleRightCss * scaleX);
             },
 
             _initGL(canvas) {
@@ -840,6 +1055,7 @@
                     this._overlayCanvas.height = h;
                 }
                 if (this._scene) this._scene.setAspect(h > 0 ? w / h : 1);
+                this._updateVisibleRightBound();
             },
 
             destroy() {
@@ -868,6 +1084,10 @@
             async _buildChordData(bundle, key, filename) {
                 const { arrangement_index: arrangementIndex, title } = bundle.songInfo;
                 const chordEvents = buildChordEvents(bundle.chords, bundle.chordTemplates);
+                // Resolved once per song build, not per frame — draw() reads
+                // this._cache.colorScheme rather than touching localStorage on
+                // every frame (see CLAUDE.md's per-frame perf rules).
+                const colorScheme = getActiveColorScheme();
 
                 // Tier 1: pre-computed sidecar file, checked first (hybrid
                 // design, project brief decision 1). Persistent and shareable —
@@ -878,13 +1098,25 @@
                 if (precomputed && precomputed.available && precomputed.data) {
                     const numbers = matchSidecarToChordEvents(precomputed.data.chords, chordEvents);
                     if (numbers) {
+                        // matchSidecarToChordEvents already verified count + time
+                        // alignment, so precomputed.data.chords[i] <-> chordEvents[i]
+                        // 1:1 — safe to pull quality from the sidecar's own symbol
+                        // at the same index rather than re-deriving it.
                         const numbersById = new Map();
-                        chordEvents.forEach((ev, i) => numbersById.set(ev.id, numbers[i]));
+                        const qualityById = new Map();
+                        chordEvents.forEach((ev, i) => {
+                            numbersById.set(ev.id, numbers[i]);
+                            const sidecarSymbol = precomputed.data.chords[i] && precomputed.data.chords[i].symbol;
+                            qualityById.set(ev.id, sidecarSymbol ? parseChordSymbol(sidecarSymbol).quality : null);
+                        });
                         this._cache = {
                             songKey: key,
                             key: precomputed.data.detected_key || null,
                             confidence: 'confident',
                             numbersById,
+                            qualityById,
+                            colorScheme,
+                            uniqueChords: buildUniqueChordList(numbersById, qualityById, colorScheme),
                         };
                         return;
                     }
@@ -908,12 +1140,22 @@
                 const resolvedKey = keyResult ? keyResult.key : null;
 
                 const numbersById = new Map();
+                const qualityById = new Map();
                 for (const ev of chordEvents) {
                     numbersById.set(ev.id, ev.symbol ? chordToNashvilleNumber(ev.symbol, resolvedKey || 'C') : null);
+                    qualityById.set(ev.id, ev.symbol ? parseChordSymbol(ev.symbol).quality : null);
                 }
 
                 if (this._building !== key) return;
-                this._cache = { songKey: key, key: resolvedKey, confidence, numbersById };
+                this._cache = {
+                    songKey: key,
+                    key: resolvedKey,
+                    confidence,
+                    numbersById,
+                    qualityById,
+                    colorScheme,
+                    uniqueChords: buildUniqueChordList(numbersById, qualityById, colorScheme),
+                };
 
                 // Tier 2: only ever persist a result we're actually confident
                 // in — writing an 'uncertain' guess to disk as if it were
@@ -995,11 +1237,18 @@
                 // the confidence styling itself.
                 const uncertain = this._cache && this._cache.confidence === 'uncertain';
                 const baseAlpha = uncertain ? 0.5 : 0.9;
+                // this._cache.colorScheme is resolved once per song in
+                // _buildChordData, not read from localStorage per frame here.
+                const scheme = this._cache && this._cache.colorScheme;
                 for (const v of visible) {
+                    const number = this._cache ? this._cache.numbersById.get(v.chord.id) : null;
+                    const rgb = isRealNashvilleNumber(number)
+                        ? scheme.colorForChord(number, this._cache.qualityById.get(v.chord.id)).rgb01
+                        : NEEDS_REVIEW_RGB01; // null, or a non-diatonic fallback string — not a real scale degree
                     scene.drawBox(
                         0, 0, v.z,
                         HIGHWAY.BLOCK_WIDTH, HIGHWAY.BLOCK_HEIGHT, HIGHWAY.BLOCK_DEPTH,
-                        [0.25, 0.55, 0.95, baseAlpha * v.fadeAlpha],
+                        [rgb[0], rgb[1], rgb[2], baseAlpha * v.fadeAlpha],
                     );
                 }
             },
@@ -1042,6 +1291,7 @@
                 for (const v of visible) {
                     const number = this._cache.numbersById.get(v.chord.id);
                     if (number == null) continue;
+                    const label = displayLabel(number, this._cache.qualityById.get(v.chord.id));
                     const screen = this._scene.worldToScreen(
                         0, HIGHWAY.BLOCK_HEIGHT + 0.15, v.z,
                         this._overlayCanvas.width, this._overlayCanvas.height,
@@ -1055,14 +1305,67 @@
                     if (uncertain) {
                         ctx.setLineDash([3, 3]);
                         ctx.strokeStyle = `rgba(255,255,255,${0.5 * v.fadeAlpha})`;
-                        ctx.strokeText(number, screen.x, screen.y);
+                        ctx.strokeText(label, screen.x, screen.y);
                         ctx.fillStyle = `rgba(255,255,255,${0.7 * v.fadeAlpha})`;
                     } else {
                         ctx.setLineDash([]);
                         ctx.fillStyle = `rgba(255,255,255,${v.fadeAlpha})`;
                     }
-                    ctx.fillText(number, screen.x, screen.y);
+                    ctx.fillText(label, screen.x, screen.y);
                 }
+                ctx.textAlign = 'start';
+
+                this._drawReferencePanel(ctx);
+            },
+
+            // Compact "key" of every distinct chord/number the loaded song
+            // actually uses — a slim vertical strip docked to the right edge,
+            // between the top info chrome and the bottom playback controls (see
+            // project design discussion: the standard 3D highway needs that
+            // width for its fretboard neck graphic, this plugin doesn't, so the
+            // space is free to use here instead). Ordered by circle-of-fifths
+            // hue (see buildUniqueChordList) to match the block coloring.
+            _drawReferencePanel(ctx) {
+                const chords = this._cache && this._cache.uniqueChords;
+                if (!chords || !chords.length) return;
+
+                const height = this._overlayCanvas.height;
+                const CHIP_W = 56;
+                const CHIP_H = 26;
+                const GAP = 6;
+                const MARGIN_RIGHT = 14;
+                const MARGIN_TOP = 56; // clears the song title / tuning chrome above the canvas
+                const MARGIN_BOTTOM = 90; // clears the playback control bar below the canvas
+
+                const available = height - MARGIN_TOP - MARGIN_BOTTOM;
+                const maxChips = Math.max(1, Math.floor(available / (CHIP_H + GAP)));
+                const shown = chords.slice(0, maxChips);
+
+                // Dock to the right edge of whatever's actually visible in the
+                // viewport, not the full canvas buffer — see
+                // _updateVisibleRightBound()'s doc comment for why those two
+                // can differ.
+                const rightBound = this._visibleRightBound != null ? this._visibleRightBound : this._overlayCanvas.width;
+                const x = Math.max(0, rightBound - MARGIN_RIGHT - CHIP_W);
+                let y = MARGIN_TOP;
+
+                ctx.font = '13px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                for (const c of shown) {
+                    ctx.fillStyle = 'rgba(10,12,18,0.55)';
+                    ctx.fillRect(x, y, CHIP_W, CHIP_H);
+                    ctx.fillStyle = c.color.css;
+                    ctx.fillRect(x, y, 5, CHIP_H); // left accent bar carries the block's color
+                    ctx.fillStyle = 'rgba(255,255,255,0.9)';
+                    ctx.fillText(c.label, x + CHIP_W / 2 + 3, y + CHIP_H / 2);
+                    y += CHIP_H + GAP;
+                }
+                if (shown.length < chords.length) {
+                    ctx.fillStyle = 'rgba(255,255,255,0.5)';
+                    ctx.fillText(`+${chords.length - shown.length}`, x + CHIP_W / 2, y + CHIP_H / 2);
+                }
+                ctx.textBaseline = 'alphabetic';
                 ctx.textAlign = 'start';
             },
         };

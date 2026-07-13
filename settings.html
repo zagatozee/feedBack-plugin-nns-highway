@@ -13,19 +13,50 @@
             </span>
         </span>
     </label>
+    <label class="flex items-start gap-2 mt-3 mb-1 text-xs text-gray-300">
+        <span class="flex-1">
+            Chord block color scheme
+            <select id="nns-color-scheme" class="w-full mt-1 bg-dark-700 border border-gray-800 rounded-lg px-2 py-1.5 text-xs text-gray-300 outline-none">
+                <option value="circle_of_fifths">Circle of fifths (default)</option>
+            </select>
+            <span class="block text-gray-500 mt-0.5">
+                How each chord block is colored. Circle of fifths orders hues by
+                harmonic distance from the key's tonic (so 1, 4 and 5 land close
+                together), not by raw scale-degree number. Minor/diminished
+                chords use a darker, desaturated version of the same hue;
+                extensions (7, sus, add9, b/#) share the base chord's color and
+                are shown via the on-block number label instead.
+            </span>
+        </span>
+    </label>
     <script>
         (function () {
-            var KEY = 'nns_highway.autoGenerate';
+            var AUTO_GEN_KEY = 'nns_highway.autoGenerate';
             var box = document.getElementById('nns-auto-generate');
-            if (!box) return;
-            try {
-                box.checked = window.localStorage.getItem(KEY) === 'true';
-            } catch (e) { /* localStorage unavailable — leave unchecked */ }
-            box.addEventListener('change', function () {
+            if (box) {
                 try {
-                    window.localStorage.setItem(KEY, box.checked ? 'true' : 'false');
-                } catch (e) { /* ignore — best-effort persistence, same as the plugin's own save calls */ }
-            });
+                    box.checked = window.localStorage.getItem(AUTO_GEN_KEY) === 'true';
+                } catch (e) { /* localStorage unavailable — leave unchecked */ }
+                box.addEventListener('change', function () {
+                    try {
+                        window.localStorage.setItem(AUTO_GEN_KEY, box.checked ? 'true' : 'false');
+                    } catch (e) { /* ignore — best-effort persistence, same as the plugin's own save calls */ }
+                });
+            }
+
+            var COLOR_SCHEME_KEY = 'nns_highway.colorScheme';
+            var select = document.getElementById('nns-color-scheme');
+            if (select) {
+                try {
+                    var saved = window.localStorage.getItem(COLOR_SCHEME_KEY);
+                    if (saved) select.value = saved;
+                } catch (e) { /* localStorage unavailable — leave at default */ }
+                select.addEventListener('change', function () {
+                    try {
+                        window.localStorage.setItem(COLOR_SCHEME_KEY, select.value);
+                    } catch (e) { /* ignore — best-effort persistence */ }
+                });
+            }
         })();
     </script>
 </div>
