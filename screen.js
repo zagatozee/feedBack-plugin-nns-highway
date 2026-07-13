@@ -990,6 +990,25 @@
                 this._overlayCanvas.style.left = '0';
                 this._overlayCanvas.style.top = '0';
                 this._overlayCanvas.style.pointerEvents = 'none';
+                // Without an explicit z-index this stays at stacking level
+                // "auto" — confirmed live against feedBack's own player chrome
+                // that #highway itself carries an explicit `z-index: 1` (see
+                // #player #highway in feedBack's CSS), which per normal CSS
+                // stacking order (positive z-index paints after/above z-index
+                // auto, regardless of DOM order) puts the WebGL canvas's fully
+                // opaque per-pixel buffer (Scene.clear() clears to alpha 1.0
+                // every frame, so there is no transparent gap to show through)
+                // ON TOP of this 2D overlay everywhere the two overlap. This
+                // silently ate the entire overlay (glyphs happened to still be
+                // readable only where the WebGL canvas doesn't paint anything
+                // opaque at that exact pixel) and made the reference panel
+                // fully invisible despite its pixels being correctly present
+                // in the overlay's own buffer — confirmed by forcing a high
+                // z-index experimentally and watching the panel reappear.
+                // 2 is enough to clear #highway's z-index:1 while staying
+                // below feedBack's own HUD/transport/popover chrome (all
+                // z-index >= 20), so real UI still layers above this overlay.
+                this._overlayCanvas.style.zIndex = '2';
                 this._overlayCanvas.width = canvas.width;
                 this._overlayCanvas.height = canvas.height;
                 canvas.parentNode.style.position = canvas.parentNode.style.position || 'relative';
