@@ -6,7 +6,6 @@
     "type": "visualization",
     "description": "Chord highway showing Nashville numbers relative to the song's detected key.",
     "category": "practice",
-    "scriptType": "module",
     "script": "screen.js",
     "routes": "routes.py",
     "settings": { "html": "settings.html" }

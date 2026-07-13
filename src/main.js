@@ -61,8 +61,28 @@ const HIGHWAY = {
 };
 HIGHWAY.FLOOR_LENGTH = HIGHWAY.FUTURE_WINDOW * HIGHWAY.SPEED + 10;
 
-function songCacheKey(songInfo) {
-    return `${songInfo.filename}#${songInfo.arrangement_index}`;
+// bundle.songInfo does NOT carry the song's filename — confirmed against a
+// real running instance: the song_info WS message (and therefore
+// bundle.songInfo) only has {title, artist, arrangement, arrangement_index,
+// arrangements, duration, tuning, capo, centOffset, format, audio_url,
+// audio_error, stems, ...}, no filename. That field only exists on the
+// DIFFERENT songInfo shape passed to the (unused, by design) Auto-mode
+// matchesArrangement(songInfo) callback — conflating the two silently sent
+// every backend request in this plugin to "/nashville/undefined" and
+// "/sections/undefined" for an entire session, which 404'd and gracefully
+// (but wrongly, from a UX standpoint) fell back to live/uncertain every
+// time, masking itself as "just an uncertain song" rather than a bug.
+// window.feedBack.currentSong.filename is the real, populated source.
+function getCurrentSongFilename() {
+    try {
+        return (window.feedBack && window.feedBack.currentSong && window.feedBack.currentSong.filename) || null;
+    } catch (e) {
+        return null;
+    }
+}
+
+function songCacheKey(filename, arrangementIndex) {
+    return `${filename}#${arrangementIndex}`;
 }
 
 function buildChordEvents(chords, chordTemplates) {
@@ -150,10 +170,11 @@ function createNnsHighwayRenderer() {
         },
 
         draw(bundle) {
-            const key = songCacheKey(bundle.songInfo);
+            const filename = getCurrentSongFilename();
+            const key = songCacheKey(filename, bundle.songInfo.arrangement_index);
             if ((!this._cache || this._cache.songKey !== key) && this._building !== key) {
                 this._building = key;
-                this._buildChordData(bundle, key).finally(() => {
+                this._buildChordData(bundle, key, filename).finally(() => {
                     if (this._building === key) this._building = null;
                 });
             }
@@ -194,8 +215,8 @@ function createNnsHighwayRenderer() {
 
         // ── Per-song build (not per-frame) ──────────────────────────────
 
-        async _buildChordData(bundle, key) {
-            const { filename, arrangement_index: arrangementIndex, title } = bundle.songInfo;
+        async _buildChordData(bundle, key, filename) {
+            const { arrangement_index: arrangementIndex, title } = bundle.songInfo;
             const chordEvents = buildChordEvents(bundle.chords, bundle.chordTemplates);
 
             // Tier 1: pre-computed sidecar file, checked first (hybrid

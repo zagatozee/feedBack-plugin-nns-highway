@@ -3,14 +3,19 @@
 // docstring for the exact on-disk layout / hard write constraints) — this
 // module only knows the HTTP surface.
 
-const PLUGIN_ID = 'nns_highway';
+// Named distinctly from sections-api.js's own PLUGIN_ID constant (same
+// value) — both files get concatenated into one shared scope by
+// build-screen.mjs for the classic (non-ES-module) deployed screen.js, so a
+// same-named `const` in two source files would collide there even though
+// each is a separate module scope here.
+const NASHVILLE_FILE_PLUGIN_ID = 'nns_highway';
 
 // Returns { available: true, data } | { available: false } | null (network
 // failure). Callers treat both `available: false` and `null` identically —
 // "no usable pre-computed file" — the distinction only matters for logging.
 export async function fetchPrecomputed(filename, arrangementIndex) {
     try {
-        const url = `/api/plugins/${PLUGIN_ID}/nashville/${encodeURIComponent(filename)}?arrangement=${encodeURIComponent(arrangementIndex)}`;
+        const url = `/api/plugins/${NASHVILLE_FILE_PLUGIN_ID}/nashville/${encodeURIComponent(filename)}?arrangement=${encodeURIComponent(arrangementIndex)}`;
         const res = await fetch(url);
         if (!res.ok) return null;
         return await res.json();
@@ -27,7 +32,7 @@ export async function fetchPrecomputed(filename, arrangementIndex) {
 // caller's contract is "best-effort persistence," not a blocking operation.
 export async function savePrecomputed(filename, arrangementIndex, payload) {
     try {
-        const url = `/api/plugins/${PLUGIN_ID}/nashville/${encodeURIComponent(filename)}?arrangement=${encodeURIComponent(arrangementIndex)}`;
+        const url = `/api/plugins/${NASHVILLE_FILE_PLUGIN_ID}/nashville/${encodeURIComponent(filename)}?arrangement=${encodeURIComponent(arrangementIndex)}`;
         const res = await fetch(url, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
