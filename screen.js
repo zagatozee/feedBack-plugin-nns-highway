@@ -886,6 +886,27 @@
         return `${filename}#${arrangementIndex}`;
     }
 
+    // Binary search for the first index in a time-ascending-sorted array whose
+    // `.t` field is >= targetTime. Local implementation — this used to call a
+    // bundle.lowerBoundT() helper, which turned out not to exist on the real
+    // render bundle at all: confirmed live by capturing the actual bundle
+    // object passed to draw(), whose only function-typed properties are
+    // {project, fretX, getNoteState, getNoteStateProvider}. Every draw() call
+    // threw, and after 3 failed frames in a row feedBack's core silently
+    // reverted to the default renderer (a real, documented core behavior —
+    // not a plugin crash the user would see directly), which is why chord
+    // blocks never appeared at all and standard note gems showed instead.
+    function lowerBoundByTime(sortedChords, targetTime) {
+        let lo = 0;
+        let hi = sortedChords.length;
+        while (lo < hi) {
+            const mid = (lo + hi) >>> 1;
+            if (sortedChords[mid].t < targetTime) lo = mid + 1;
+            else hi = mid;
+        }
+        return lo;
+    }
+
     function buildChordEvents(chords, chordTemplates) {
         const events = [];
         for (const c of chords) {
@@ -1189,14 +1210,15 @@
 
             // ── Per-frame draw ───────────────────────────────────────────────
 
-            // Windowed to the visible time range via the bundle's binary-search
-            // helper rather than a full array scan, per the project's per-frame
-            // perf rules. Computed ONCE per frame and shared by _drawScene and
-            // _drawOverlay so the 3D block and its glyph never disagree about
-            // where a chord is — both read the same `z` for a given chord.
+            // Windowed to the visible time range via a local binary-search
+            // helper (see lowerBoundByTime's doc comment) rather than a full
+            // array scan, per the project's per-frame perf rules. Computed ONCE
+            // per frame and shared by _drawScene and _drawOverlay so the 3D
+            // block and its glyph never disagree about where a chord is — both
+            // read the same `z` for a given chord.
             _collectVisibleChords(bundle) {
                 const result = [];
-                const startIdx = bundle.lowerBoundT(bundle.chords, bundle.currentTime - HIGHWAY.PAST_WINDOW);
+                const startIdx = lowerBoundByTime(bundle.chords, bundle.currentTime - HIGHWAY.PAST_WINDOW);
                 for (let i = startIdx; i < bundle.chords.length; i++) {
                     const chord = bundle.chords[i];
                     if (chord.t > bundle.currentTime + HIGHWAY.FUTURE_WINDOW) break;
