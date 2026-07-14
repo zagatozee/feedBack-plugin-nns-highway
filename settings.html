@@ -54,6 +54,17 @@
             width above.
         </span>
     </div>
+    <div class="mt-3 mb-1">
+        <label for="nns-wheel-scale" class="text-xs font-medium text-gray-400 mb-1 block">
+            Reference wheel size: <span id="nns-wheel-scale-label">100</span>%
+        </label>
+        <input type="range" id="nns-wheel-scale" min="50" max="150" step="10" value="100"
+            class="w-full" aria-describedby="nns-wheel-scale-desc">
+        <span id="nns-wheel-scale-desc" class="block text-gray-500 mt-0.5 text-xs">
+            Size of the circle-of-fifths reference wheel docked top-center. Stays
+            centered and clear of the section-marker bar and HUD at every size.
+        </span>
+    </div>
     <script>
         (function () {
             var AUTO_GEN_KEY = 'nns_highway.autoGenerate';
@@ -107,6 +118,10 @@
             }
             wireSlider('nns-highway-width', 'nns-highway-width-label', 'nns_highway.highwayWidthPct', 100);
             wireSlider('nns-highway-offset', 'nns-highway-offset-label', 'nns_highway.highwayOffsetPct', 0);
+            // Wheel scale is read once per song build (see main.js's
+            // getActiveWheelScale), not on resize like width/offset above —
+            // the effect appears next time a song loads.
+            wireSlider('nns-wheel-scale', 'nns-wheel-scale-label', 'nns_highway.wheelScalePct', 100);
         })();
     </script>
 </div>

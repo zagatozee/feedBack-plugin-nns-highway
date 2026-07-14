@@ -38,6 +38,8 @@ const HIGHWAY_WIDTH_KEY = 'nns_highway.highwayWidthPct';
 const HIGHWAY_OFFSET_KEY = 'nns_highway.highwayOffsetPct';
 const HIGHWAY_WIDTH_DEFAULT_PCT = 100;
 const HIGHWAY_OFFSET_DEFAULT_PCT = 0;
+const WHEEL_SCALE_KEY = 'nns_highway.wheelScalePct';
+const WHEEL_SCALE_DEFAULT_PCT = 100;
 
 function isAutoGenerateEnabled() {
     try {
@@ -74,6 +76,22 @@ function getActiveLayoutSettings() {
     widthPct = Math.min(100, Math.max(20, widthPct));
     offsetPct = Math.min(50, Math.max(-50, offsetPct));
     return { widthPct, offsetPct };
+}
+
+// Reference-wheel size, as a fraction (1 = 100%, the default) — read once
+// per song build (see _buildChordData, same timing as getActiveColorScheme)
+// since it's a pure display preference unrelated to canvas geometry, not a
+// resize-time concern like the layout settings above. Clamped to 50%-150%:
+// see _drawReferenceWheel's doc comment for the geometry headroom check
+// behind that range.
+function getActiveWheelScale() {
+    let pct = WHEEL_SCALE_DEFAULT_PCT;
+    try {
+        const stored = parseFloat(window.localStorage.getItem(WHEEL_SCALE_KEY));
+        if (Number.isFinite(stored)) pct = stored;
+    } catch (e) { /* localStorage unavailable -> default */ }
+    pct = Math.min(150, Math.max(50, pct));
+    return pct / 100;
 }
 
 // Standard Nashville Number System notation: a bare number means a plain
@@ -451,9 +469,11 @@ function createNnsHighwayRenderer() {
             const { arrangement_index: arrangementIndex, title } = bundle.songInfo;
             const chordEvents = buildChordEvents(bundle.chords, bundle.chordTemplates);
             // Resolved once per song build, not per frame — draw() reads
-            // this._cache.colorScheme rather than touching localStorage on
-            // every frame (see CLAUDE.md's per-frame perf rules).
+            // this._cache.colorScheme/wheelScale rather than touching
+            // localStorage on every frame (see CLAUDE.md's per-frame perf
+            // rules).
             const colorScheme = getActiveColorScheme();
+            const wheelScale = getActiveWheelScale();
 
             // Tier 1: pre-computed sidecar file, checked first (hybrid
             // design, project brief decision 1). Persistent and shareable —
@@ -482,6 +502,7 @@ function createNnsHighwayRenderer() {
                         numbersById,
                         qualityById,
                         colorScheme,
+                        wheelScale,
                         uniqueChords: buildUniqueChordList(numbersById, qualityById, colorScheme),
                     };
                     return;
@@ -520,6 +541,7 @@ function createNnsHighwayRenderer() {
                 numbersById,
                 qualityById,
                 colorScheme,
+                wheelScale,
                 uniqueChords: buildUniqueChordList(numbersById, qualityById, colorScheme),
             };
 
@@ -718,46 +740,63 @@ function createNnsHighwayRenderer() {
         // already encodes. Unused ring positions get a faint unlit tick
         // rather than being omitted, so the wheel reads as a stable "clock
         // face" across different songs instead of a shape that changes
-        // entirely each time.
+        // entirely each time. Roots that share a ring position (e.g. "6"
+        // and "6m" — same root, different quality) get split into two (or
+        // more) smaller dots/labels spread across a small arc around that
+        // position rather than only showing one, each still colored via
+        // the normal major/minor color-scheme treatment so they stay
+        // visually distinguishable by quality, not just position.
         //
         // Centered horizontally in the visible viewport (see
         // _updateVisibleRightBound's doc comment for why that can differ
         // from the raw canvas), fixed vertically just below the section-
-        // marker bar — confirmed via the actual camera/projection matrices
+        // marker bar regardless of wheelScale (see getActiveWheelScale) —
+        // only the wheel's own dimensions scale, never its docking
+        // position. Confirmed via the actual camera/projection matrices
         // (gl-math.js) that no chord block, even at the far edge of
         // HIGHWAY.FUTURE_WINDOW, ever renders above screen y~665 in a
-        // 1459-tall canvas, so this band (centered at y=290, radius~90
-        // including labels) is always clear of both the highway content
-        // and feedBack's own top/right HUD chrome (which lives in the
-        // corners, not top-center).
+        // 1459-tall canvas, and that the section-marker bar only occupies
+        // this overlay's own buffer-relative y 0-20 — so this band clears
+        // both the highway content and feedBack's own top/right HUD chrome
+        // (which lives in the corners, not top-center) even at the
+        // largest allowed wheel scale (1.5x: labels reach out to ~y=158,
+        // still ~140px clear of the section-marker bar, and down to
+        // ~y=422, ~240px clear of the nearest a block ever gets).
         _drawReferenceWheel(ctx) {
             const chords = this._cache && this._cache.uniqueChords;
             const scheme = this._cache && this._cache.colorScheme;
+            const wheelScale = (this._cache && this._cache.wheelScale) || 1;
             if (!chords || !chords.length || !scheme) return;
 
             // One ring slot per circle-of-fifths position (hue), not per
-            // label — e.g. "6" and "6m" share a root and would collide on
-            // the ring regardless of quality, so only the first (uniqueChords
-            // is already hue-then-label sorted) is shown. A deliberate
-            // simplification versus the old linear panel, which had room to
-            // list every label separately.
+            // label — e.g. "6" and "6m" share a root and therefore the
+            // same ring angle; every entry at a shared hue is kept (drawn
+            // as a split marker below) rather than only the first.
             const byHue = new Map();
             let tonicEntry = null;
             for (const c of chords) {
                 if (c.number === '1' && !tonicEntry) tonicEntry = c;
-                else if (!byHue.has(c.color.hue)) byHue.set(c.color.hue, c);
+                else {
+                    if (!byHue.has(c.color.hue)) byHue.set(c.color.hue, []);
+                    byHue.get(c.color.hue).push(c);
+                }
             }
             const tonicColor = tonicEntry ? tonicEntry.color : scheme.colorForChord('1', 'maj');
             const tonicLabel = tonicEntry ? tonicEntry.label : '1';
 
             const visibleWidth = this._visibleRightBound != null ? this._visibleRightBound : this._overlayCanvas.width;
             const centerX = visibleWidth / 2;
-            const CENTER_Y = 290;
-            const RING_RADIUS = 70;
-            const HUB_RADIUS = 20;
-            const DOT_RADIUS = 10;
-            const TICK_RADIUS = 3;
-            const LABEL_RADIUS = RING_RADIUS + 24;
+            const CENTER_Y = 290; // fixed regardless of wheelScale -- docking position, not size
+            const RING_RADIUS = 70 * wheelScale;
+            const HUB_RADIUS = 20 * wheelScale;
+            const DOT_RADIUS = 10 * wheelScale;
+            const TICK_RADIUS = 3 * wheelScale;
+            const LABEL_RADIUS = RING_RADIUS + 24 * wheelScale;
+            // Same-hue entries split across a small arc centered on their
+            // shared position — half the base ring spacing (30deg) so even
+            // 3-4 stacked entries stay closer to their true position than
+            // to a neighboring one.
+            const STACK_SPREAD_DEG = 14;
 
             // hue 0 (tonic) at 12 o'clock; increasing hue sweeps clockwise,
             // matching the order the color scheme already places chords in
@@ -788,35 +827,46 @@ function createNnsHighwayRenderer() {
             }
 
             // Lit ring positions — one dot + label per distinct non-tonic
-            // root the song actually uses, colored exactly like its blocks.
-            ctx.font = '12px sans-serif';
-            for (const [hue, c] of byHue) {
-                const dot = pointForHue(hue, RING_RADIUS);
-                ctx.fillStyle = c.color.css;
-                ctx.beginPath();
-                ctx.arc(dot.x, dot.y, DOT_RADIUS, 0, Math.PI * 2);
-                ctx.fill();
+            // root the song actually uses, colored exactly like its
+            // blocks. A position with more than one entry (shared root,
+            // different quality) splits into smaller dots/labels spread
+            // across STACK_SPREAD_DEG instead of one dot at full size.
+            for (const [hue, entries] of byHue) {
+                const n = entries.length;
+                const dotRadius = n > 1 ? DOT_RADIUS * 0.72 : DOT_RADIUS;
+                const labelBgRadius = (n > 1 ? 10 : 13) * wheelScale;
+                ctx.font = `${Math.round((n > 1 ? 11 : 12) * wheelScale)}px sans-serif`;
+                entries.forEach((c, i) => {
+                    const hueOffset = n > 1 ? -STACK_SPREAD_DEG / 2 + (STACK_SPREAD_DEG * i) / (n - 1) : 0;
+                    const entryHue = hue + hueOffset;
 
-                const label = pointForHue(hue, LABEL_RADIUS);
-                ctx.fillStyle = 'rgba(10,12,18,0.6)';
-                ctx.beginPath();
-                ctx.arc(label.x, label.y, 13, 0, Math.PI * 2);
-                ctx.fill();
-                ctx.fillStyle = 'rgba(255,255,255,0.92)';
-                ctx.fillText(c.label, label.x, label.y);
+                    const dot = pointForHue(entryHue, RING_RADIUS);
+                    ctx.fillStyle = c.color.css;
+                    ctx.beginPath();
+                    ctx.arc(dot.x, dot.y, dotRadius, 0, Math.PI * 2);
+                    ctx.fill();
+
+                    const label = pointForHue(entryHue, LABEL_RADIUS);
+                    ctx.fillStyle = 'rgba(10,12,18,0.6)';
+                    ctx.beginPath();
+                    ctx.arc(label.x, label.y, labelBgRadius, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.fillStyle = 'rgba(255,255,255,0.92)';
+                    ctx.fillText(c.label, label.x, label.y);
+                });
             }
 
             // Central hub — the tonic, always shown regardless of what the
             // ring contains.
             ctx.fillStyle = 'rgba(10,12,18,0.7)';
             ctx.beginPath();
-            ctx.arc(centerX, CENTER_Y, HUB_RADIUS + 3, 0, Math.PI * 2);
+            ctx.arc(centerX, CENTER_Y, HUB_RADIUS + 3 * wheelScale, 0, Math.PI * 2);
             ctx.fill();
             ctx.fillStyle = tonicColor.css;
             ctx.beginPath();
             ctx.arc(centerX, CENTER_Y, HUB_RADIUS, 0, Math.PI * 2);
             ctx.fill();
-            ctx.font = 'bold 14px sans-serif';
+            ctx.font = `bold ${Math.round(14 * wheelScale)}px sans-serif`;
             ctx.fillStyle = 'rgba(255,255,255,0.95)';
             ctx.fillText(tonicLabel, centerX, CENTER_Y);
 
