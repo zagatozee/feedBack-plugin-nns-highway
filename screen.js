@@ -837,6 +837,8 @@
     const HIGHWAY_OFFSET_DEFAULT_PCT = 0;
     const WHEEL_SCALE_KEY = 'nns_highway.wheelScalePct';
     const WHEEL_SCALE_DEFAULT_PCT = 100;
+    const DIAGRAM_STYLE_KEY = 'nns_highway.diagramStyle';
+    const DIAGRAM_STYLE_DEFAULT = 'colored';
 
     function isAutoGenerateEnabled() {
         try {
@@ -891,6 +893,18 @@
         return pct / 100;
     }
 
+    // 'colored' (Rocksmith-style, one color per string) or 'classic' (single
+    // neutral color, no per-string distinction) — settings.html's diagram
+    // style select. Read once per song build, same timing as the other
+    // display prefs above.
+    function getActiveDiagramStyle() {
+        try {
+            const stored = window.localStorage.getItem(DIAGRAM_STYLE_KEY);
+            if (stored === 'colored' || stored === 'classic') return stored;
+        } catch (e) { /* localStorage unavailable -> default */ }
+        return DIAGRAM_STYLE_DEFAULT;
+    }
+
     // Standard Nashville Number System notation: a bare number means a plain
     // major triad, so only non-major qualities get a visible suffix (e.g. "6m",
     // "27", "4sus4"). Extensions/modifiers are distinguished this way rather
@@ -931,6 +945,27 @@
     // "the 1 chord," and a needs-review block asserting that would be
     // misleading rather than merely unstyled.
     const NEEDS_REVIEW_RGB01 = [0.35, 0.35, 0.38];
+
+    // 'colored' style's per-string palette for the chord diagram (see
+    // _drawActiveChordDiagram) — the standard 6-color set Rocksmith's own note
+    // highway lanes use, one per string. Indexed the same as chordTemplates'
+    // own fingers/frets arrays (index 0..5); RS2014-format templates are
+    // assumed here to order those index 0 = high e through index 5 = low E,
+    // matching the note-`string` attribute convention used elsewhere in
+    // RS2014 arrangement XML — unverified against a written spec, but the
+    // exact index<->physical-string mapping only affects which color lands on
+    // which string, not whether the diagram is otherwise correct (fret
+    // positions, open/muted markers, finger numbers all come from the same
+    // arrays regardless of which physical string index 0 turns out to be).
+    const ROCKSMITH_STRING_COLORS = [
+        '#c159dd', // 0
+        '#ff9800', // 1
+        '#4fc3f7', // 2
+        '#f5d800', // 3
+        '#e0393e', // 4
+        '#1eb8b8', // 5
+    ];
+    const DIAGRAM_CLASSIC_COLOR = '#d8dee8';
 
     // bundle.songInfo does NOT carry the song's filename — confirmed against a
     // real running instance: the song_info WS message (and therefore
@@ -982,7 +1017,16 @@
         for (const c of chords) {
             const template = chordTemplates[c.id];
             const symbol = resolveChordSymbolFromTemplate(template) || null;
-            events.push({ id: c.id, time: c.t, symbol });
+            // fingers/frets ride along here (not just the resolved symbol) so
+            // _buildChordData can cache a per-id fret-diagram lookup in the
+            // same pass — see templatesById below.
+            events.push({
+                id: c.id,
+                time: c.t,
+                symbol,
+                fingers: template && template.fingers,
+                frets: template && template.frets,
+            });
         }
         return events;
     }
@@ -1265,12 +1309,20 @@
             async _buildChordData(bundle, key, filename) {
                 const { arrangement_index: arrangementIndex, title } = bundle.songInfo;
                 const chordEvents = buildChordEvents(bundle.chords, bundle.chordTemplates);
+                // fingers/frets per id, for the chord-diagram overlay — built
+                // once here (not per frame) same as everything else in this
+                // cache. Independent of which tier below actually resolves the
+                // chord's number/quality, since it comes straight from the
+                // bundle's own chordTemplates, not the sidecar/live-computed data.
+                const templatesById = new Map();
+                for (const ev of chordEvents) templatesById.set(ev.id, { fingers: ev.fingers, frets: ev.frets });
                 // Resolved once per song build, not per frame — draw() reads
                 // this._cache.colorScheme/wheelScale rather than touching
                 // localStorage on every frame (see CLAUDE.md's per-frame perf
                 // rules).
                 const colorScheme = getActiveColorScheme();
                 const wheelScale = getActiveWheelScale();
+                const diagramStyle = getActiveDiagramStyle();
 
                 // Tier 1: pre-computed sidecar file, checked first (hybrid
                 // design, project brief decision 1). Persistent and shareable —
@@ -1300,6 +1352,8 @@
                             qualityById,
                             colorScheme,
                             wheelScale,
+                            diagramStyle,
+                            templatesById,
                             uniqueChords: buildUniqueChordList(numbersById, qualityById, colorScheme),
                         };
                         return;
@@ -1339,6 +1393,8 @@
                     qualityById,
                     colorScheme,
                     wheelScale,
+                    diagramStyle,
+                    templatesById,
                     uniqueChords: buildUniqueChordList(numbersById, qualityById, colorScheme),
                 };
 
@@ -1524,6 +1580,15 @@
                         console.error('[nns_highway] reference wheel draw failed:', e);
                     }
                 }
+
+                try {
+                    this._drawActiveChordDiagram(ctx, visible);
+                } catch (e) {
+                    if (!this._loggedDiagramError) {
+                        this._loggedDiagramError = true;
+                        console.error('[nns_highway] chord diagram draw failed:', e);
+                    }
+                }
             },
 
             // Compact circle-of-fifths "wheel" glyph of every distinct root the
@@ -1679,6 +1744,125 @@
                 ctx.fillStyle = 'rgba(255,255,255,0.95)';
                 ctx.fillText(tonicLabel, centerX, CENTER_Y);
 
+                ctx.textBaseline = 'alphabetic';
+                ctx.textAlign = 'start';
+            },
+
+            // Fret/finger diagram for the single chord currently nearest the
+            // hit line (smallest |z| among visible) — not one per block. A
+            // diagram per block would mean a dozen-plus small diagrams
+            // scrolling and scaling with the highway at once, illegible at
+            // any reasonable size; anchoring one diagram to a fixed on-screen
+            // spot for whichever chord is ABOUT TO BE (or just was) played
+            // reads like an actual "what do I play now" aid instead of highway
+            // clutter, similar in spirit to how the confidence/key HUD is a
+            // single fixed annotation rather than per-block repetition.
+            //
+            // Docked bottom-center, clearing the bottom transport bar the same
+            // way the old linear reference panel used to (MARGIN_BOTTOM=90,
+            // see its retired doc comment) — the highway's own vanishing point
+            // is mid-screen, so bottom-center stays clear of the 3D content
+            // for the same reason top-center does for the wheel.
+            _drawActiveChordDiagram(ctx, visible) {
+                if (!visible.length || !this._cache || !this._cache.templatesById) return;
+                let nearest = null;
+                for (const v of visible) {
+                    if (!nearest || Math.abs(v.z) < Math.abs(nearest.z)) nearest = v;
+                }
+                if (!nearest) return;
+                const template = this._cache.templatesById.get(nearest.chord.id);
+                if (!template || !Array.isArray(template.frets) || !template.frets.some((f) => f > 0)) return; // no fretted notes -- nothing to diagram (open-string-only or unresolved shape)
+
+                const frets = template.frets;
+                const fingers = Array.isArray(template.fingers) ? template.fingers : [];
+                const colored = this._cache.diagramStyle !== 'classic';
+                const stringCount = frets.length;
+
+                const frettedValues = frets.filter((f) => f > 0);
+                const minFret = Math.min(...frettedValues);
+                const maxFret = Math.max(...frettedValues);
+                // Standard chord-chart convention: show from the nut if
+                // everything fits in the first 4 frets, otherwise a 4-fret
+                // window starting at the lowest fretted note (with a position
+                // marker, e.g. "5fr", since the nut itself isn't in view).
+                const showFromNut = maxFret <= 4;
+                const fretWindow = 4;
+                const startFret = showFromNut ? 0 : minFret;
+
+                const STRING_GAP = 16;
+                const FRET_GAP = 20;
+                const PAD = 22;
+                const width = STRING_GAP * (stringCount - 1) + PAD * 2;
+                const height = FRET_GAP * fretWindow + PAD * 2 + 10; // +10 for the open/muted row above the nut
+
+                const visibleWidth = this._visibleRightBound != null ? this._visibleRightBound : this._overlayCanvas.width;
+                const x0 = visibleWidth / 2 - width / 2;
+                const y0 = this._overlayCanvas.height - 90 - height; // 90 == MARGIN_BOTTOM, clears the transport bar
+
+                ctx.fillStyle = 'rgba(10,12,18,0.72)';
+                ctx.fillRect(x0, y0, width, height);
+
+                const gridX0 = x0 + PAD;
+                const gridY0 = y0 + PAD + 10;
+                const stringX = (i) => gridX0 + i * STRING_GAP;
+
+                ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+                ctx.lineWidth = 1;
+                for (let i = 0; i < stringCount; i++) {
+                    ctx.beginPath();
+                    ctx.moveTo(stringX(i), gridY0);
+                    ctx.lineTo(stringX(i), gridY0 + FRET_GAP * fretWindow);
+                    ctx.stroke();
+                }
+                for (let row = 0; row <= fretWindow; row++) {
+                    const y = gridY0 + row * FRET_GAP;
+                    ctx.lineWidth = row === 0 && showFromNut ? 3 : 1;
+                    ctx.beginPath();
+                    ctx.moveTo(gridX0, y);
+                    ctx.lineTo(gridX0 + STRING_GAP * (stringCount - 1), y);
+                    ctx.stroke();
+                }
+                if (!showFromNut) {
+                    ctx.font = '11px sans-serif';
+                    ctx.fillStyle = 'rgba(255,255,255,0.7)';
+                    ctx.textAlign = 'right';
+                    ctx.textBaseline = 'middle';
+                    ctx.fillText(`${startFret}fr`, gridX0 - 6, gridY0 + FRET_GAP / 2);
+                }
+
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                for (let i = 0; i < stringCount; i++) {
+                    const fret = frets[i];
+                    const x = stringX(i);
+                    if (fret === -1) {
+                        ctx.font = '12px sans-serif';
+                        ctx.fillStyle = 'rgba(255,255,255,0.55)';
+                        ctx.fillText('x', x, gridY0 - 8);
+                        continue;
+                    }
+                    if (fret === 0) {
+                        ctx.strokeStyle = 'rgba(255,255,255,0.7)';
+                        ctx.lineWidth = 1.5;
+                        ctx.beginPath();
+                        ctx.arc(x, gridY0 - 8, 4, 0, Math.PI * 2);
+                        ctx.stroke();
+                        continue;
+                    }
+                    const relFret = fret - startFret;
+                    if (relFret < 1 || relFret > fretWindow) continue; // outside this window -- shouldn't happen given startFret's derivation, but don't plot garbage if it does
+                    const y = gridY0 + (relFret - 0.5) * FRET_GAP;
+                    ctx.fillStyle = colored ? ROCKSMITH_STRING_COLORS[i % ROCKSMITH_STRING_COLORS.length] : DIAGRAM_CLASSIC_COLOR;
+                    ctx.beginPath();
+                    ctx.arc(x, y, 6.5, 0, Math.PI * 2);
+                    ctx.fill();
+                    const fingerNum = fingers[i];
+                    if (fingerNum > 0) {
+                        ctx.font = 'bold 9px sans-serif';
+                        ctx.fillStyle = 'rgba(10,12,18,0.9)';
+                        ctx.fillText(String(fingerNum), x, y + 0.5);
+                    }
+                }
                 ctx.textBaseline = 'alphabetic';
                 ctx.textAlign = 'start';
             },

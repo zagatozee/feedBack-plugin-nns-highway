@@ -65,6 +65,21 @@
             centered and clear of the section-marker bar and HUD at every size.
         </span>
     </div>
+    <label class="flex items-start gap-2 mt-3 mb-1 text-xs text-gray-300">
+        <span class="flex-1">
+            Chord diagram style
+            <select id="nns-diagram-style" class="w-full mt-1 bg-dark-700 border border-gray-800 rounded-lg px-2 py-1.5 text-xs text-gray-300 outline-none">
+                <option value="colored">Rocksmith colors (default)</option>
+                <option value="classic">Classic (single color)</option>
+            </select>
+            <span class="block text-gray-500 mt-0.5">
+                Fret diagram shown bottom-center for whichever chord is nearest the
+                hit line. "Rocksmith colors" matches the note highway's own
+                per-string color convention; "Classic" uses a single neutral dot
+                color, closer to a printed chord chart.
+            </span>
+        </span>
+    </label>
     <script>
         (function () {
             var AUTO_GEN_KEY = 'nns_highway.autoGenerate';
@@ -122,6 +137,20 @@
             // getActiveWheelScale), not on resize like width/offset above —
             // the effect appears next time a song loads.
             wireSlider('nns-wheel-scale', 'nns-wheel-scale-label', 'nns_highway.wheelScalePct', 100);
+
+            var DIAGRAM_STYLE_KEY = 'nns_highway.diagramStyle';
+            var diagramSelect = document.getElementById('nns-diagram-style');
+            if (diagramSelect) {
+                try {
+                    var savedStyle = window.localStorage.getItem(DIAGRAM_STYLE_KEY);
+                    if (savedStyle) diagramSelect.value = savedStyle;
+                } catch (e) { /* localStorage unavailable — leave at default */ }
+                diagramSelect.addEventListener('change', function () {
+                    try {
+                        window.localStorage.setItem(DIAGRAM_STYLE_KEY, diagramSelect.value);
+                    } catch (e) { /* ignore — best-effort persistence */ }
+                });
+            }
         })();
     </script>
 </div>
