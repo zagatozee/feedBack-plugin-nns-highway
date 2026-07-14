@@ -793,10 +793,17 @@ function createNnsHighwayRenderer() {
             const TICK_RADIUS = 3 * wheelScale;
             const LABEL_RADIUS = RING_RADIUS + 24 * wheelScale;
             // Same-hue entries split across a small arc centered on their
-            // shared position — half the base ring spacing (30deg) so even
-            // 3-4 stacked entries stay closer to their true position than
-            // to a neighboring one.
-            const STACK_SPREAD_DEG = 14;
+            // shared position, spaced by a fixed angular STEP between
+            // adjacent entries (not a fixed total spread — a fixed total
+            // divided across n entries shrinks per-pair separation as n
+            // grows, which is exactly what let 3+ stacked entries overlap
+            // into unreadable garbled text before this was per-step; e.g.
+            // a song with tonic chords voiced as plain-major, "5", "5add9"
+            // and "m" all collapses 3 non-hub entries onto hue 0). Kept
+            // well under half the base 30deg ring spacing even for a
+            // handful of entries so a stack still reads as "near its true
+            // position," not spilling into a neighboring ring slot.
+            const STACK_STEP_DEG = 13;
 
             // hue 0 (tonic) at 12 o'clock; increasing hue sweeps clockwise,
             // matching the order the color scheme already places chords in
@@ -829,15 +836,20 @@ function createNnsHighwayRenderer() {
             // Lit ring positions — one dot + label per distinct non-tonic
             // root the song actually uses, colored exactly like its
             // blocks. A position with more than one entry (shared root,
-            // different quality) splits into smaller dots/labels spread
-            // across STACK_SPREAD_DEG instead of one dot at full size.
+            // different quality) splits into smaller dots/labels spread at
+            // STACK_STEP_DEG apart instead of one dot at full size — and
+            // shrinks progressively as the stack grows so 3-4 entries at
+            // one position still have room to stay legible.
             for (const [hue, entries] of byHue) {
                 const n = entries.length;
-                const dotRadius = n > 1 ? DOT_RADIUS * 0.72 : DOT_RADIUS;
-                const labelBgRadius = (n > 1 ? 10 : 13) * wheelScale;
-                ctx.font = `${Math.round((n > 1 ? 11 : 12) * wheelScale)}px sans-serif`;
+                // 1 -> 1, 2 -> 0.72, 3 -> 0.6, 4 -> 0.5, floor 0.42 beyond that.
+                const shrink = n > 1 ? Math.max(0.42, 0.84 - 0.12 * (n - 1)) : 1;
+                const dotRadius = DOT_RADIUS * shrink;
+                const labelBgRadius = 13 * wheelScale * shrink;
+                ctx.font = `${Math.round(12 * wheelScale * shrink)}px sans-serif`;
+                const spread = STACK_STEP_DEG * (n - 1);
                 entries.forEach((c, i) => {
-                    const hueOffset = n > 1 ? -STACK_SPREAD_DEG / 2 + (STACK_SPREAD_DEG * i) / (n - 1) : 0;
+                    const hueOffset = n > 1 ? -spread / 2 + STACK_STEP_DEG * i : 0;
                     const entryHue = hue + hueOffset;
 
                     const dot = pointForHue(entryHue, RING_RADIUS);
