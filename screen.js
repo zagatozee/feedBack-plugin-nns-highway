@@ -947,23 +947,23 @@
     const NEEDS_REVIEW_RGB01 = [0.35, 0.35, 0.38];
 
     // 'colored' style's per-string palette for the chord diagram (see
-    // _drawActiveChordDiagram) — the standard 6-color set Rocksmith's own note
-    // highway lanes use, one per string. Indexed the same as chordTemplates'
-    // own fingers/frets arrays (index 0..5); RS2014-format templates are
-    // assumed here to order those index 0 = high e through index 5 = low E,
-    // matching the note-`string` attribute convention used elsewhere in
-    // RS2014 arrangement XML — unverified against a written spec, but the
-    // exact index<->physical-string mapping only affects which color lands on
-    // which string, not whether the diagram is otherwise correct (fret
-    // positions, open/muted markers, finger numbers all come from the same
-    // arrays regardless of which physical string index 0 turns out to be).
+    // _drawActiveChordDiagram) — verified against the actual installed 3D
+    // Highway plugin's own screen.js (PALETTES.default / S_COL, and its
+    // comment "low E=red, A=yellow, D=blue, G=orange, B=green, high E=purple"
+    // — feedBack's own index convention there is s=0 == low E, s=5 == high E).
+    // chordTemplates' fingers/frets arrays run the OPPOSITE direction (RS2014
+    // chart format is high-e-first: index 0 == high e, index 5 == low E — see
+    // the 3D Highway plugin's own "Templates are high-e-first" comments), so
+    // this array is written high-e-first too — the reverse of S_COL's own
+    // order — specifically so it can be indexed directly by the same i used
+    // for frets[i]/fingers[i], with no separate reversal at each call site.
     const ROCKSMITH_STRING_COLORS = [
-        '#c159dd', // 0
-        '#ff9800', // 1
-        '#4fc3f7', // 2
-        '#f5d800', // 3
-        '#e0393e', // 4
-        '#1eb8b8', // 5
+        '#b518d9', // 0 -- high e
+        '#3fc413', // 1 -- B
+        '#f18313', // 2 -- G
+        '#1096e6', // 3 -- D
+        '#ecd234', // 4 -- A
+        '#e61f26', // 5 -- low E
     ];
     const DIAGRAM_CLASSIC_COLOR = '#d8dee8';
 
