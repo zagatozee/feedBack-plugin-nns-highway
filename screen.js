@@ -969,12 +969,13 @@
         return events;
     }
 
-    // Builds the deduplicated legend list for the reference panel — one entry
-    // per distinct on-screen label the song actually uses (same granularity as
-    // displayLabel(), so "6" and "6m" are listed separately), ordered by
-    // circle-of-fifths hue position to match the block coloring rather than by
-    // first appearance, so the legend reads like a stable reference the player
-    // can scan once rather than a shuffled list.
+    // Builds the deduplicated chord list backing the reference wheel — one
+    // entry per distinct on-screen label the song actually uses (same
+    // granularity as displayLabel(), so "6" and "6m" are separate entries
+    // here), ordered by circle-of-fifths hue position to match the block
+    // coloring rather than by first appearance. _drawReferenceWheel further
+    // collapses entries that share a hue (e.g. "6"/"6m" share a root) down to
+    // one ring slot each, since the wheel encodes root position, not quality.
     function buildUniqueChordList(numbersById, qualityById, scheme) {
         const seen = new Map(); // label -> { label, number, quality, color }
         for (const [id, number] of numbersById) {
@@ -1022,7 +1023,8 @@
             // browser viewport — see _updateVisibleRightBound()'s doc comment.
             // Recomputed on resize only (getBoundingClientRect forces layout,
             // so this must never run on the per-frame draw() path), used by
-            // _drawReferencePanel to keep the legend from landing off-screen.
+            // _drawReferenceWheel to center itself within the visible width
+            // rather than the raw (possibly overflowing) canvas.
             _visibleRightBound: null,
 
             // Buffer-pixel sub-rectangle {x, y, width, height} (top-left
@@ -1493,62 +1495,128 @@
                 // failure can't take down the glyphs/HUD too, and log it once
                 // so it's actually visible instead of failing invisibly.
                 try {
-                    this._drawReferencePanel(ctx);
+                    this._drawReferenceWheel(ctx);
                 } catch (e) {
-                    if (!this._loggedPanelError) {
-                        this._loggedPanelError = true;
-                        console.error('[nns_highway] reference panel draw failed:', e);
+                    if (!this._loggedWheelError) {
+                        this._loggedWheelError = true;
+                        console.error('[nns_highway] reference wheel draw failed:', e);
                     }
                 }
             },
 
-            // Compact "key" of every distinct chord/number the loaded song
-            // actually uses — a slim vertical strip docked to the right edge,
-            // between the top info chrome and the bottom playback controls (see
-            // project design discussion: the standard 3D highway needs that
-            // width for its fretboard neck graphic, this plugin doesn't, so the
-            // space is free to use here instead). Ordered by circle-of-fifths
-            // hue (see buildUniqueChordList) to match the block coloring.
-            _drawReferencePanel(ctx) {
+            // Compact circle-of-fifths "wheel" glyph of every distinct root the
+            // loaded song actually uses — the tonic (1) sits as a labeled hub
+            // at the wheel's center, and every other used root gets a dot on
+            // the ring around it, positioned at the SAME hue angle
+            // hueForNashvilleNumber() already gives it for block coloring (see
+            // color-scheme.js) — reused here as an angle instead of a hue, so
+            // 5/4 land immediately adjacent to center and 2/6/3/7 progressively
+            // further round, matching the same adjacency the color scheme
+            // already encodes. Unused ring positions get a faint unlit tick
+            // rather than being omitted, so the wheel reads as a stable "clock
+            // face" across different songs instead of a shape that changes
+            // entirely each time.
+            //
+            // Centered horizontally in the visible viewport (see
+            // _updateVisibleRightBound's doc comment for why that can differ
+            // from the raw canvas), fixed vertically just below the section-
+            // marker bar — confirmed via the actual camera/projection matrices
+            // (gl-math.js) that no chord block, even at the far edge of
+            // HIGHWAY.FUTURE_WINDOW, ever renders above screen y~665 in a
+            // 1459-tall canvas, so this band (centered at y=290, radius~90
+            // including labels) is always clear of both the highway content
+            // and feedBack's own top/right HUD chrome (which lives in the
+            // corners, not top-center).
+            _drawReferenceWheel(ctx) {
                 const chords = this._cache && this._cache.uniqueChords;
-                if (!chords || !chords.length) return;
+                const scheme = this._cache && this._cache.colorScheme;
+                if (!chords || !chords.length || !scheme) return;
 
-                const height = this._overlayCanvas.height;
-                const CHIP_W = 56;
-                const CHIP_H = 26;
-                const GAP = 6;
-                const MARGIN_RIGHT = 14;
-                const MARGIN_TOP = 56; // clears the song title / tuning chrome above the canvas
-                const MARGIN_BOTTOM = 90; // clears the playback control bar below the canvas
+                // One ring slot per circle-of-fifths position (hue), not per
+                // label — e.g. "6" and "6m" share a root and would collide on
+                // the ring regardless of quality, so only the first (uniqueChords
+                // is already hue-then-label sorted) is shown. A deliberate
+                // simplification versus the old linear panel, which had room to
+                // list every label separately.
+                const byHue = new Map();
+                let tonicEntry = null;
+                for (const c of chords) {
+                    if (c.number === '1' && !tonicEntry) tonicEntry = c;
+                    else if (!byHue.has(c.color.hue)) byHue.set(c.color.hue, c);
+                }
+                const tonicColor = tonicEntry ? tonicEntry.color : scheme.colorForChord('1', 'maj');
+                const tonicLabel = tonicEntry ? tonicEntry.label : '1';
 
-                const available = height - MARGIN_TOP - MARGIN_BOTTOM;
-                const maxChips = Math.max(1, Math.floor(available / (CHIP_H + GAP)));
-                const shown = chords.slice(0, maxChips);
+                const visibleWidth = this._visibleRightBound != null ? this._visibleRightBound : this._overlayCanvas.width;
+                const centerX = visibleWidth / 2;
+                const CENTER_Y = 290;
+                const RING_RADIUS = 70;
+                const HUB_RADIUS = 20;
+                const DOT_RADIUS = 10;
+                const TICK_RADIUS = 3;
+                const LABEL_RADIUS = RING_RADIUS + 24;
 
-                // Dock to the right edge of whatever's actually visible in the
-                // viewport, not the full canvas buffer — see
-                // _updateVisibleRightBound()'s doc comment for why those two
-                // can differ.
-                const rightBound = this._visibleRightBound != null ? this._visibleRightBound : this._overlayCanvas.width;
-                const x = Math.max(0, rightBound - MARGIN_RIGHT - CHIP_W);
-                let y = MARGIN_TOP;
+                // hue 0 (tonic) at 12 o'clock; increasing hue sweeps clockwise,
+                // matching the order the color scheme already places chords in
+                // (1 -> 5 -> 2 -> 6 -> 3 -> 7 -> 4 around the circle of fifths).
+                const pointForHue = (hue, radius) => {
+                    const theta = (hue * Math.PI) / 180;
+                    return { x: centerX + radius * Math.sin(theta), y: CENTER_Y - radius * Math.cos(theta) };
+                };
 
-                ctx.font = '13px sans-serif';
                 ctx.textAlign = 'center';
                 ctx.textBaseline = 'middle';
-                for (const c of shown) {
-                    ctx.fillStyle = 'rgba(10,12,18,0.55)';
-                    ctx.fillRect(x, y, CHIP_W, CHIP_H);
+
+                ctx.strokeStyle = 'rgba(255,255,255,0.10)';
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                ctx.arc(centerX, CENTER_Y, RING_RADIUS, 0, Math.PI * 2);
+                ctx.stroke();
+
+                // Faint unlit ticks for the 11 non-tonic ring positions this
+                // song doesn't use.
+                for (let hue = 30; hue < 360; hue += 30) {
+                    if (byHue.has(hue)) continue;
+                    const p = pointForHue(hue, RING_RADIUS);
+                    ctx.fillStyle = 'rgba(255,255,255,0.18)';
+                    ctx.beginPath();
+                    ctx.arc(p.x, p.y, TICK_RADIUS, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+
+                // Lit ring positions — one dot + label per distinct non-tonic
+                // root the song actually uses, colored exactly like its blocks.
+                ctx.font = '12px sans-serif';
+                for (const [hue, c] of byHue) {
+                    const dot = pointForHue(hue, RING_RADIUS);
                     ctx.fillStyle = c.color.css;
-                    ctx.fillRect(x, y, 5, CHIP_H); // left accent bar carries the block's color
-                    ctx.fillStyle = 'rgba(255,255,255,0.9)';
-                    ctx.fillText(c.label, x + CHIP_W / 2 + 3, y + CHIP_H / 2);
-                    y += CHIP_H + GAP;
+                    ctx.beginPath();
+                    ctx.arc(dot.x, dot.y, DOT_RADIUS, 0, Math.PI * 2);
+                    ctx.fill();
+
+                    const label = pointForHue(hue, LABEL_RADIUS);
+                    ctx.fillStyle = 'rgba(10,12,18,0.6)';
+                    ctx.beginPath();
+                    ctx.arc(label.x, label.y, 13, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.fillStyle = 'rgba(255,255,255,0.92)';
+                    ctx.fillText(c.label, label.x, label.y);
                 }
-                if (shown.length < chords.length) {
-                    ctx.fillStyle = 'rgba(255,255,255,0.5)';
-                    ctx.fillText(`+${chords.length - shown.length}`, x + CHIP_W / 2, y + CHIP_H / 2);
-                }
+
+                // Central hub — the tonic, always shown regardless of what the
+                // ring contains.
+                ctx.fillStyle = 'rgba(10,12,18,0.7)';
+                ctx.beginPath();
+                ctx.arc(centerX, CENTER_Y, HUB_RADIUS + 3, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.fillStyle = tonicColor.css;
+                ctx.beginPath();
+                ctx.arc(centerX, CENTER_Y, HUB_RADIUS, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.font = 'bold 14px sans-serif';
+                ctx.fillStyle = 'rgba(255,255,255,0.95)';
+                ctx.fillText(tonicLabel, centerX, CENTER_Y);
+
                 ctx.textBaseline = 'alphabetic';
                 ctx.textAlign = 'start';
             },
